@@ -1,0 +1,24 @@
+# Artefactos de build
+control-center/build/bin/
+agent/build/
+installers/windows/lan-agent.exe
+installers/linux/lan-agent-linux
+
+# Dependencias
+node_modules/
+
+# Bases de datos y datos locales
+*.db
+*.jsonl
+
+# Logs
+*.log
+
+# Scratch del flujo de trabajo
+.superpowers/
+
+# SO / editores
+Thumbs.db
+.DS_Store
+.vscode/
+.idea/
