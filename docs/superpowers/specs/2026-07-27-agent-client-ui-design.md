@@ -562,6 +562,9 @@ UI, no después.
   operaciones; hay que sostenerla en el tiempo — cualquier futura operación que
   acepte texto libre rompe la propiedad.
 
+**Verificación de Fyne (Tarea 1, Fase 1):** ejecutada el 2026-07-27. Resultado:
+arranca en Windows 11 Enterprise 10.0.26100.
+
 ## Trabajo futuro relacionado (fuera de alcance)
 
 **Identidad por equipo con mTLS en lugar de tokens.** Con tokens obligatorios, el
