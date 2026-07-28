@@ -562,8 +562,53 @@ UI, no después.
   operaciones; hay que sostenerla en el tiempo — cualquier futura operación que
   acepte texto libre rompe la propiedad.
 
-**Verificación de Fyne (Tarea 1, Fase 1):** ejecutada el 2026-07-27. Resultado:
-arranca en Windows 11 Enterprise 10.0.26100.
+**Verificación de Fyne (Tarea 1, Fase 1) — INVÁLIDA, corregida el 2026-07-27.**
+La nota original de esta sección afirmaba "arranca en Windows 11 Enterprise
+10.0.26100", pero esa verificación no probó nada: `go get fyne.io/fyne/v2`
+había añadido la dependencia a `go.mod`, pero ningún archivo Go del proyecto
+la importaba. Confirmado con `grep -rn "fyne" --include="*.go" .` (sin
+resultados), `go list -deps ./cmd/lan-agent | grep -c fyne` (0), y
+`go mod why fyne.io/fyne/v2` ("main module does not need package
+fyne.io/fyne/v2"). El linker nunca incluyó Fyne en el binario que se arrancó;
+el "arranca" registrado no descartaba el riesgo de esta sección, solo
+confirmaba que un binario sin Fyne arranca.
+
+Corrección intentada el 2026-07-27, en Windows 11 Enterprise 10.0.26100: para
+forzar el enlace real se creó `agent/internal/ui/app.go` con una función
+`Run` que construye una `fyne.App` de verdad (`app.NewWithID(...)`) y una
+`fyne.Window`, y se modificó `agent/cmd/lan-agent/main.go` para importar
+`internal/ui` y despachar a `ui.Run` bajo el flag `--ui`, reproduciendo la
+topología final en la que el binario del servicio y el de la interfaz son el
+mismo ejecutable. Con esos cambios, `go list -deps ./cmd/lan-agent | grep -c
+fyne` pasó a devolver 95 y `go mod why fyne.io/fyne/v2` mostró la cadena de
+import real (`.../internal/ui` → `fyne.io/fyne/v2`), confirmando que el
+enlace real por fin estaba en juego.
+
+Sin embargo, la verificación **no pudo completarse en esta máquina**: el
+driver de escritorio de Fyne en Windows (`glfw` + OpenGL, paquete
+`github.com/go-gl/gl`) requiere CGO, y este entorno de compilación no tiene
+un compilador de C instalado ni acceso de administrador para instalarlo.
+`go build ./...` con `CGO_ENABLED=0` (el valor por defecto detectado en esta
+máquina) falla con "build constraints exclude all Go files" para el paquete
+`go-gl/gl`; forzando `CGO_ENABLED=1` falla de inmediato con
+`cgo: C compiler "gcc" not found: exec: "gcc": executable file not found in
+%PATH%`; y `choco install mingw -y` para instalar el compilador falla con
+"Acceso denegado" por falta de privilegios de administrador. No se intentó
+ningún otro workaround (drivers alternativos, compiladores portátiles,
+etc.), conforme a la instrucción de no improvisar alternativas cuando la
+puerta de riesgo no se puede cruzar.
+
+**Resultado: la puerta de riesgo sigue sin verificarse empíricamente.** No es
+un "no arranca" (nunca llegó a compilar el binario real), pero tampoco es un
+"arranca" válido — es un bloqueo de herramientas de compilación en esta
+máquina de desarrollo, distinto del riesgo arquitectónico que la tarea
+buscaba descartar. Los cambios de código de esta corrección (`internal/ui/app.go`,
+los flags `--ui`/`--managed-by-notice` en `main.go`, y las dependencias
+transitivas añadidas a `go.mod`/`go.sum`) se revirtieron para no dejar en el
+árbol un estado a medio verificar. Antes de retomar la Fase 1 sobre la
+premisa de un binario único, esta verificación debe repetirse en una máquina
+Windows con un compilador de C (MinGW-w64/TDM-GCC) instalado y disponible en
+`PATH`.
 
 ## Trabajo futuro relacionado (fuera de alcance)
 

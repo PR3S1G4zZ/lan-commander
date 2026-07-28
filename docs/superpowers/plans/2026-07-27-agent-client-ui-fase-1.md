@@ -182,6 +182,24 @@ Expected: PASS ambos tests.
 
 - [ ] **Step 5: La verificación que importa — que el servicio siga compilando y arrancando**
 
+**Precondición, antes de nada:** `probe.go` y `probe_test.go` por sí solos NO
+enlazan Fyne — son un paquete que solo usa variables de entorno y `runtime`,
+sin importar `fyne.io/fyne/v2` en ningún archivo `.go` del proyecto. `go get`
+solo añade la dependencia a `go.mod`; el linker no incluye un paquete que
+nada importa. La primera ejecución de esta tarea (2026-07-27) se detuvo en
+el Step 4 sin darse cuenta de esto, y el arranque del binario en el Step 5
+no probó nada sobre el riesgo — arrancó un binario sin Fyne enlazado.
+
+Antes de correr el binario, confirmar que Fyne está de verdad en el grafo de
+dependencias del binario que se va a arrancar:
+
+Run: `cd C:/Proyectos/lan-commander/agent && go list -deps ./cmd/lan-agent | grep -c fyne`
+Expected: un número mayor que 0. Si da 0, la verificación de arranque que
+sigue es un placebo — no continuar sin antes lograr un import real (p. ej. un
+`agent/internal/ui` que construya una `fyne.App`/`fyne.Window` real, importado
+desde `cmd/lan-agent` detrás de un flag como `--ui`, reproduciendo la
+topología final en la que el mismo binario sirve ambos modos).
+
 Run: `cd C:/Proyectos/lan-commander/agent && go build ./...`
 Expected: compila sin errores.
 
