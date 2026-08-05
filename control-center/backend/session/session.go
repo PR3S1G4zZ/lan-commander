@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,6 +18,7 @@ type Session struct {
 	Name          string    `json:"name"`
 	Host          string    `json:"host"`
 	Port          int       `json:"port"`
+	Secure        bool      `json:"secure"`
 	AuthToken     string    `json:"auth_token,omitempty"`
 	CreatedAt     time.Time `json:"created_at"`
 	LastConnected time.Time `json:"last_connected"`
@@ -67,6 +69,25 @@ func (m *Manager) Open(dbDir string) error {
 		return fmt.Errorf("failed to create sessions table: %w", err)
 	}
 
+	if err := m.ensureSecureColumn(); err != nil {
+		m.db.Close()
+		m.db = nil
+		return fmt.Errorf("failed to migrate sessions table: %w", err)
+	}
+
+	return nil
+}
+
+func (m *Manager) ensureSecureColumn() error {
+
+	_, err := m.db.Exec("ALTER TABLE sessions ADD COLUMN secure INTEGER NOT NULL DEFAULT 0")
+
+	if err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+
+		return err
+
+	}
+
 	return nil
 }
 
@@ -88,6 +109,7 @@ func (m *Manager) createTable() error {
 		name TEXT NOT NULL DEFAULT '',
 		host TEXT NOT NULL,
 		port INTEGER NOT NULL,
+		secure INTEGER NOT NULL DEFAULT 0,
 		auth_token TEXT NOT NULL DEFAULT '',
 		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		last_connected DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -115,14 +137,15 @@ func (m *Manager) Save(s Session) (int64, error) {
 	}
 
 	query := `
-	INSERT INTO sessions (name, host, port, auth_token, created_at, last_connected)
-	VALUES (?, ?, ?, ?, ?, ?)
+	INSERT INTO sessions (name, host, port, secure, auth_token, created_at, last_connected)
+	VALUES (?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(host, port) DO UPDATE SET
 		name = excluded.name,
+		secure = excluded.secure,
 		auth_token = excluded.auth_token,
 		last_connected = excluded.last_connected;`
 
-	result, err := m.db.Exec(query, s.Name, s.Host, s.Port, s.AuthToken, s.CreatedAt, s.LastConnected)
+	result, err := m.db.Exec(query, s.Name, s.Host, s.Port, s.Secure, s.AuthToken, s.CreatedAt, s.LastConnected)
 	if err != nil {
 		return 0, fmt.Errorf("failed to save session: %w", err)
 	}
@@ -167,7 +190,7 @@ func (m *Manager) LoadAll() ([]Session, error) {
 	}
 
 	rows, err := m.db.Query(
-		"SELECT id, name, host, port, auth_token, created_at, last_connected FROM sessions ORDER BY last_connected DESC")
+		"SELECT id, name, host, port, secure, auth_token, created_at, last_connected FROM sessions ORDER BY last_connected DESC")
 	if err != nil {
 		return nil, fmt.Errorf("failed to load sessions: %w", err)
 	}
@@ -176,7 +199,7 @@ func (m *Manager) LoadAll() ([]Session, error) {
 	var sessions []Session
 	for rows.Next() {
 		var s Session
-		if err := rows.Scan(&s.ID, &s.Name, &s.Host, &s.Port, &s.AuthToken, &s.CreatedAt, &s.LastConnected); err != nil {
+		if err := rows.Scan(&s.ID, &s.Name, &s.Host, &s.Port, &s.Secure, &s.AuthToken, &s.CreatedAt, &s.LastConnected); err != nil {
 			return nil, fmt.Errorf("failed to scan session row: %w", err)
 		}
 		sessions = append(sessions, s)
@@ -200,9 +223,9 @@ func (m *Manager) LoadByHost(host string, port int) (*Session, error) {
 
 	var s Session
 	err := m.db.QueryRow(
-		"SELECT id, name, host, port, auth_token, created_at, last_connected FROM sessions WHERE host = ? AND port = ?",
+		"SELECT id, name, host, port, secure, auth_token, created_at, last_connected FROM sessions WHERE host = ? AND port = ?",
 		host, port,
-	).Scan(&s.ID, &s.Name, &s.Host, &s.Port, &s.AuthToken, &s.CreatedAt, &s.LastConnected)
+	).Scan(&s.ID, &s.Name, &s.Host, &s.Port, &s.Secure, &s.AuthToken, &s.CreatedAt, &s.LastConnected)
 
 	if err == sql.ErrNoRows {
 		return nil, nil

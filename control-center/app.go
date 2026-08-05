@@ -22,6 +22,7 @@ import (
 	"control-center/backend/scripting"
 	"control-center/backend/session"
 	"control-center/backend/wol"
+	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 const (
@@ -114,7 +115,7 @@ func (a *App) startup(ctx context.Context) {
 		}
 
 		for _, s := range savedSessions {
-			agentID, err := a.clientMgr.Connect(s.Host, s.Port, s.AuthToken)
+			agentID, err := a.clientMgr.Connect(s.Host, s.Port, s.AuthToken, s.Secure)
 			if err != nil {
 				log.Printf("app: failed to reconnect to %s:%d: %v", s.Host, s.Port, err)
 				continue
@@ -182,9 +183,9 @@ func (a *App) onAgentDiscovered(d discovery.AgentDiscovered) {
 	// Reuse the token of a saved session for this host:port if we have one.
 	// Agents are token-protected by default, so a blind anonymous connect
 	// would just be rejected.
-	token := a.savedTokenFor(d.Host, d.Port)
+	token, secure := a.savedTokenFor(d.Host, d.Port)
 
-	if _, err := a.clientMgr.Connect(d.Host, d.Port, token); err != nil {
+	if _, err := a.clientMgr.Connect(d.Host, d.Port, token, secure); err != nil {
 		if errors.Is(err, client.ErrAuthRequired) {
 			// Expected for any agent we have no credentials for: surface it in
 			// the audit log so the admin knows to add it manually, and stop.
@@ -197,22 +198,34 @@ func (a *App) onAgentDiscovered(d discovery.AgentDiscovered) {
 	}
 }
 
-// savedTokenFor returns the auth token of a saved session matching host:port,
-// or an empty string when none exists.
-func (a *App) savedTokenFor(host string, port int) string {
+// savedTokenFor returns the token and transport mode of a saved session.
+func (a *App) savedTokenFor(host string, port int) (string, bool) {
+
 	if a.sessions == nil {
-		return ""
+
+		return "", false
+
 	}
+
 	saved, err := a.sessions.LoadAll()
+
 	if err != nil {
-		return ""
+
+		return "", false
+
 	}
+
 	for _, s := range saved {
+
 		if s.Host == host && s.Port == port {
-			return s.AuthToken
+
+			return s.AuthToken, s.Secure
+
 		}
+
 	}
-	return ""
+
+	return "", false
 }
 
 // --- Agent Message Callback ---
@@ -250,7 +263,7 @@ func (a *App) GetAgents() []client.AgentInfo {
 // --- Binding: ConnectAgent ---
 
 // ConnectAgent establishes a WebSocket connection to an agent.
-func (a *App) ConnectAgent(host string, port int, authToken string) error {
+func (a *App) ConnectAgent(host string, port int, authToken string, secure bool) error {
 	if host == "" {
 		return fmt.Errorf("host cannot be empty")
 	}
@@ -261,7 +274,7 @@ func (a *App) ConnectAgent(host string, port int, authToken string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	agentID, err := a.clientMgr.Connect(host, port, authToken)
+	agentID, err := a.clientMgr.Connect(host, port, authToken, secure)
 	if err != nil {
 		a.audit.Log("connect", "", "user", fmt.Sprintf("Failed to connect to %s:%d: %v", host, port, err), audit.StatusError)
 		return fmt.Errorf("failed to connect to agent: %w", err)
@@ -275,6 +288,7 @@ func (a *App) ConnectAgent(host string, port int, authToken string) error {
 		Host:      host,
 		Port:      port,
 		AuthToken: authToken,
+		Secure:    secure,
 	}
 	if _, err := a.sessions.Save(s); err != nil {
 		log.Printf("app: failed to save session: %v", err)
@@ -439,6 +453,38 @@ func (a *App) RequestScreenshot(agentID string) (*protocol.ScreenshotDataPayload
 	return &result, nil
 }
 
+func (a *App) ChooseSavePath(defaultFilename string) (string, error) {
+
+	if a.ctx == nil {
+
+		return "", fmt.Errorf("application is not ready")
+
+	}
+
+	if defaultFilename == "" {
+
+		defaultFilename = "download.bin"
+
+	}
+
+	path, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
+
+		Title: "Guardar archivo remoto",
+
+		DefaultFilename: filepath.Base(defaultFilename),
+
+		CanCreateDirectories: true,
+	})
+
+	if err != nil {
+
+		return "", fmt.Errorf("save dialog failed: %w", err)
+
+	}
+
+	return path, nil
+}
+
 // --- Binding: TransferFile ---
 
 // TransferFile downloads a complete file from an agent and stores it atomically
@@ -595,7 +641,7 @@ func (a *App) WakeOnLAN(macAddr string, broadcastIP string) error {
 // SaveSession saves a connection as a persistent session. The auth token must
 // be included: without it, reconnecting on the next launch fails against any
 // agent that requires authentication (which is now the installer default).
-func (a *App) SaveSession(host string, port int, name string, authToken string) error {
+func (a *App) SaveSession(host string, port int, name string, authToken string, secure bool) error {
 	if host == "" {
 		return fmt.Errorf("host cannot be empty")
 	}
@@ -611,6 +657,7 @@ func (a *App) SaveSession(host string, port int, name string, authToken string) 
 		Host:      host,
 		Port:      port,
 		AuthToken: authToken,
+		Secure:    secure,
 	}
 
 	if _, err := a.sessions.Save(s); err != nil {

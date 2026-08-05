@@ -1,0 +1,17 @@
+:root { font-family: "Segoe UI", system-ui, sans-serif; color: #e8eef7; background: #0f172a; }
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 460px; min-height: 100vh; background: radial-gradient(circle at top right, #164e63, #0f172a 55%); }
+button { font: inherit; }
+.shell { min-height: 100vh; padding: 28px; display: flex; flex-direction: column; gap: 22px; }
+.header { display: flex; align-items: center; gap: 14px; }
+.brand-mark { width: 44px; height: 44px; border-radius: 13px; display: grid; place-items: center; font-weight: 800; background: linear-gradient(135deg, #06b6d4, #2563eb); box-shadow: 0 10px 25px #06b6d433; }
+h1 { margin: 0; font-size: 22px; } p { margin: 3px 0 0; color: #94a3b8; font-size: 13px; }
+.close { margin-left: auto; border: 0; background: transparent; color: #94a3b8; font-size: 26px; cursor: pointer; }
+.close:hover { color: #fff; }
+.hero { display: flex; align-items: center; gap: 13px; padding: 20px; border-radius: 16px; border: 1px solid #334155; background: #172235cc; }
+.hero strong { display: block; font-size: 16px; } .hero span { display: block; margin-top: 5px; color: #94a3b8; font-size: 13px; }
+.status-dot { width: 14px; height: 14px; border-radius: 50%; background: #f59e0b; box-shadow: 0 0 12px #f59e0b88; } .status-dot.online { background: #34d399; box-shadow: 0 0 12px #34d399aa; }
+.cards { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+.card { padding: 14px; border-radius: 12px; background: #172235aa; border: 1px solid #26354d; } .card span { display: block; color: #94a3b8; font-size: 12px; } .card strong { display: block; margin-top: 5px; font-size: 16px; }
+.notice { padding: 14px 16px; border-left: 3px solid #22d3ee; background: #164e6333; } .notice strong, .notice span { display: block; } .notice span { margin-top: 4px; color: #bae6fd; }
+footer { display: flex; justify-content: space-between; align-items: center; color: #64748b; font-size: 12px; margin-top: auto; } .refresh { border: 1px solid #334155; border-radius: 8px; padding: 7px 11px; color: #cbd5e1; background: #1e293b; cursor: pointer; } .refresh:hover:not(:disabled) { border-color: #22d3ee; } .refresh:disabled { opacity: .55; cursor: wait; }

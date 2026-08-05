@@ -6,7 +6,9 @@ import {audit} from '../models';
 import {scripting} from '../models';
 import {session} from '../models';
 
-export function ConnectAgent(arg1:string,arg2:number,arg3:string):Promise<void>;
+export function ChooseSavePath(arg1:string):Promise<string>;
+
+export function ConnectAgent(arg1:string,arg2:number,arg3:string,arg4:boolean):Promise<void>;
 
 export function DeleteSession(arg1:number):Promise<void>;
 
@@ -34,7 +36,7 @@ export function RunScript(arg1:string,arg2:string,arg3:string):Promise<protocol.
 
 export function SaveScript(arg1:string,arg2:string):Promise<void>;
 
-export function SaveSession(arg1:string,arg2:number,arg3:string,arg4:string):Promise<void>;
+export function SaveSession(arg1:string,arg2:number,arg3:string,arg4:string,arg5:boolean):Promise<void>;
 
 export function TransferFile(arg1:string,arg2:string,arg3:string):Promise<void>;
 

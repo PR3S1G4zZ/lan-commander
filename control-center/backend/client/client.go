@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,25 +18,26 @@ import (
 )
 
 const (
-	writeTimeout      = 10 * time.Second
-	readTimeout       = 60 * time.Second
-	handshakeTimeout  = 10 * time.Second
-	heartbeatInterval = 30 * time.Second
+	writeTimeout        = 10 * time.Second
+	readTimeout         = 60 * time.Second
+	handshakeTimeout    = 10 * time.Second
+	heartbeatInterval   = 30 * time.Second
 	maxReconnectRetries = 5
-	reconnectDelay    = 5 * time.Second
+	reconnectDelay      = 5 * time.Second
 )
 
 // AgentInfo holds the runtime state of a connected/known agent.
 type AgentInfo struct {
-	ID         string                     `json:"id"`
-	Host       string                     `json:"host"`
-	Port       int                        `json:"port"`
-	AuthToken  string                     `json:"auth_token,omitempty"`
-	Name       string                     `json:"name"`
-	OS         string                     `json:"os"`
-	Arch       string                     `json:"arch"`
-	Connected  bool                       `json:"connected"`
-	LastSeen   time.Time                  `json:"last_seen"`
+	ID         string                      `json:"id"`
+	Host       string                      `json:"host"`
+	Port       int                         `json:"port"`
+	AuthToken  string                      `json:"auth_token,omitempty"`
+	Secure     bool                        `json:"secure"`
+	Name       string                      `json:"name"`
+	OS         string                      `json:"os"`
+	Arch       string                      `json:"arch"`
+	Connected  bool                        `json:"connected"`
+	LastSeen   time.Time                   `json:"last_seen"`
 	SystemInfo *protocol.SystemInfoPayload `json:"system_info,omitempty"`
 }
 
@@ -61,13 +63,13 @@ type pendingRequest struct {
 
 // Manager manages WebSocket connections to multiple agents.
 type Manager struct {
-	agents          map[string]*AgentConnection // agentId -> connection
-	mu              sync.RWMutex
-	onMessage       OnAgentMessage
-	globalCtx       context.Context
-	globalCancel    context.CancelFunc
-	pending         map[string]*pendingRequest // msgID -> pendingRequest
-	pendingMu       sync.RWMutex
+	agents       map[string]*AgentConnection // agentId -> connection
+	mu           sync.RWMutex
+	onMessage    OnAgentMessage
+	globalCtx    context.Context
+	globalCancel context.CancelFunc
+	pending      map[string]*pendingRequest // msgID -> pendingRequest
+	pendingMu    sync.RWMutex
 }
 
 // NewManager creates a new agent connection manager.
@@ -82,13 +84,37 @@ func NewManager(onMessage OnAgentMessage) *Manager {
 	}
 }
 
+func websocketScheme(secure bool) string {
+
+	if secure {
+
+		return "wss"
+
+	}
+
+	return "ws"
+}
+
+func newDialer(secure bool) websocket.Dialer {
+
+	dialer := websocket.Dialer{HandshakeTimeout: handshakeTimeout}
+
+	if secure {
+
+		dialer.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+
+	}
+
+	return dialer
+}
+
 // Connect establishes a WebSocket connection to an agent at host:port.
 // If authToken is non-empty, it performs an authentication handshake.
-func (m *Manager) Connect(host string, port int, authToken string) (string, error) {
+func (m *Manager) Connect(host string, port int, authToken string, secure bool) (string, error) {
 	// Check if already connected to this host:port
 	m.mu.RLock()
 	for _, ac := range m.agents {
-		if ac.info.Host == host && ac.info.Port == port && ac.info.Connected {
+		if ac.info.Host == host && ac.info.Port == port && ac.info.Secure == secure && ac.info.Connected {
 			m.mu.RUnlock()
 			return ac.info.ID, nil
 		}
@@ -100,7 +126,7 @@ func (m *Manager) Connect(host string, port int, authToken string) (string, erro
 
 	// Build WebSocket URL
 	u := url.URL{
-		Scheme: "ws",
+		Scheme: websocketScheme(secure),
 		Host:   fmt.Sprintf("%s:%d", host, port),
 		Path:   "/ws",
 	}
@@ -109,9 +135,7 @@ func (m *Manager) Connect(host string, port int, authToken string) (string, erro
 	ctx, cancel := context.WithTimeout(m.globalCtx, handshakeTimeout)
 	defer cancel()
 
-	dialer := websocket.Dialer{
-		HandshakeTimeout: handshakeTimeout,
-	}
+	dialer := newDialer(secure)
 
 	conn, _, err := dialer.DialContext(ctx, u.String(), nil)
 	if err != nil {
@@ -132,6 +156,7 @@ func (m *Manager) Connect(host string, port int, authToken string) (string, erro
 		Host:      host,
 		Port:      port,
 		AuthToken: authToken,
+		Secure:    secure,
 		Connected: true,
 		LastSeen:  time.Now(),
 	}
@@ -579,14 +604,12 @@ func (m *Manager) reconnect(ac *AgentConnection) {
 			ac.info.ID, ac.info.Host, ac.info.Port, i+1, maxReconnectRetries)
 
 		u := url.URL{
-			Scheme: "ws",
+			Scheme: websocketScheme(ac.info.Secure),
 			Host:   fmt.Sprintf("%s:%d", ac.info.Host, ac.info.Port),
 			Path:   "/ws",
 		}
 
-		dialer := websocket.Dialer{
-			HandshakeTimeout: handshakeTimeout,
-		}
+		dialer := newDialer(ac.info.Secure)
 
 		conn, _, err := dialer.DialContext(m.globalCtx, u.String(), nil)
 		if err != nil {

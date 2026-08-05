@@ -11,7 +11,6 @@ import (
 
 	"github.com/mediacode/lan-commander/agent/internal/discovery"
 	"github.com/mediacode/lan-commander/agent/internal/server"
-	"github.com/mediacode/lan-commander/agent/internal/ui"
 )
 
 // Version is set at build time.
@@ -26,8 +25,6 @@ type agentFlags struct {
 	tlsCert          string
 	tlsKey           string
 	authToken        string
-	uiMode           bool
-	managedByNotice  string
 }
 
 func parseAgentFlags(fs *flag.FlagSet, args []string) *agentFlags {
@@ -39,8 +36,6 @@ func parseAgentFlags(fs *flag.FlagSet, args []string) *agentFlags {
 	fs.StringVar(&f.tlsCert, "tls-cert", "", "TLS certificate file path")
 	fs.StringVar(&f.tlsKey, "tls-key", "", "TLS private key file path")
 	fs.StringVar(&f.authToken, "auth-token", "", "Authentication token for client connections")
-	fs.BoolVar(&f.uiMode, "ui", false, "Run the client interface in the current desktop session")
-	fs.StringVar(&f.managedByNotice, "managed-by-notice", "", "Organisation name shown in the managed-device notice")
 	_ = fs.Parse(args)
 	return f
 }
@@ -134,15 +129,6 @@ func main() {
 
 	fs := flag.NewFlagSet("lan-agent", flag.ExitOnError)
 	f := parseAgentFlags(fs, runArgs)
-
-	if f.uiMode {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		if err := ui.Run(ctx, ui.Config{Port: f.port, ManagedByNotice: f.managedByNotice, AgentVersion: Version}); err != nil {
-			log.Fatalf("[main] Interface failed: %v", err)
-		}
-		return
-	}
 
 	svcConfig := &service.Config{
 		Name:        "LANCommanderAgent",

@@ -4,7 +4,7 @@ LAN Commander es una plataforma de administracion remota para equipos conectados
 
 El proyecto esta pensado para redes internas donde no se quiere depender de SSH ni de un servicio en la nube. El descubrimiento usa mDNS y las conexiones se inician desde el equipo administrador.
 
-> Estado actual: el Control Center, el agente como servicio, la transferencia de archivos por bloques y la interfaz visual local del agente estan implementados. La interfaz del agente muestra transparencia y estado del servicio; las notificaciones, el registro de actividad local y la bandeja del sistema siguen siendo mejoras futuras.
+> Estado actual: el Control Center, el agente como servicio, la transferencia de archivos, la captura de pantalla y las aplicaciones de escritorio del agente estan implementados. Los instaladores incluyen asistente grafico para Windows y Linux con Zenity.
 
 ## Indice
 
@@ -27,7 +27,7 @@ La solucion tiene tres elementos principales:
 
 1. **Control Center**: aplicacion de escritorio para el administrador.
 2. **Agente**: servicio privilegiado instalado en cada equipo gestionado.
-3. **Interfaz visual del agente**: interfaz web local que se abre en el navegador del usuario y muestra estado, version, puerto y aviso de gestion.
+3. **Interfaz visual del agente**: aplicacion de escritorio independiente que se inicia con la sesion grafica y muestra estado, version, puerto, transporte y aviso de gestion.
 
 ```mermaid
 graph LR
@@ -39,13 +39,13 @@ graph LR
 
     subgraph win["Equipo gestionado Windows"]
         WS["Servicio LANCommanderAgent"]
-        WUI["Interfaz visual local<br/>navegador + --ui"]
+        WUI["Aplicacion lan-agent-ui<br/>Wails + Svelte"]
         WS -.-> WUI
     end
 
     subgraph linux["Equipo gestionado Linux"]
         LS["Servicio systemd LANCommanderAgent"]
-        LUI["Interfaz visual local<br/>navegador + --ui"]
+        LUI["Aplicacion lan-agent-ui<br/>Wails + Svelte"]
         LS -.-> LUI
     end
 
@@ -57,7 +57,7 @@ graph LR
     CC -->|"Wake-on-LAN UDP"| linux
 ```
 
-El servicio del agente trabaja en segundo plano y no necesita que un usuario haya iniciado sesion. La interfaz visual es un modo separado del mismo binario y solo se inicia en una sesion grafica.
+El servicio del agente trabaja en segundo plano y no necesita que un usuario haya iniciado sesion. La interfaz visual es un binario Wails separado del servicio privilegiado y solo se inicia en una sesion grafica. No abre paginas visibles de localhost ni depende de un navegador externo.
 
 ## Componentes
 
@@ -88,11 +88,11 @@ Binario Go que puede ejecutarse en primer plano o instalarse como servicio de si
 - Captura de pantalla.
 - Metricas del sistema.
 - Anuncio mDNS.
-- Interfaz visual local con `--ui`.
+- Aplicacion de escritorio `lan-agent-ui` con Wails, Svelte y Go.
 
 ### Interfaz visual del agente
 
-El modo `--ui` inicia un servidor HTTP enlazado exclusivamente a `127.0.0.1`, abre el navegador predeterminado y consulta el estado local del servicio cada pocos segundos.
+La aplicacion `lan-agent-ui` abre una ventana de escritorio Wails y consulta el estado del servicio desde el proceso local. El usuario no ve ni necesita abrir una URL.
 
 Actualmente muestra:
 
@@ -225,7 +225,7 @@ flowchart TD
 
 ## Instalacion paso a paso
 
-Los scripts esperan encontrar el binario correspondiente en la misma carpeta:
+Los scripts esperan encontrar el servicio y la aplicacion visual correspondiente en la misma carpeta. Consulta [Instalacion grafica](docs/GUI-INSTALLATION.md) para el flujo recomendado:
 
 - Windows: `installers/windows/install-agent.ps1` junto a `lan-agent.exe`.
 - Linux: `installers/linux/install-agent.sh` junto a `lan-agent-linux`.
@@ -266,7 +266,7 @@ Opciones habituales:
 .\install-agent.ps1 -Uninstall
 ```
 
-La interfaz visual se abre en el navegador al iniciar sesion. El servicio continua activo aunque el usuario cierre el navegador.
+La aplicacion visual se inicia al entrar en la sesion del usuario. El servicio continua activo aunque se cierre la ventana.
 
 ### Linux con systemd
 
@@ -345,9 +345,9 @@ Conexion manual por defecto:
 - Go 1.25 o superior para el Control Center.
 - Go 1.26 o superior para el agente.
 - Node.js 20 o superior y npm.
-- Wails CLI v2.13 o compatible.
+- Wails v2.13 como runtime de escritorio; el script de compilacion no requiere instalar el CLI.
 - WebView2 para ejecutar el Control Center en Windows.
-- No se necesita un compilador C adicional para compilar el agente y su interfaz web local.
+- No se necesita un compilador C adicional para compilar el agente y su aplicacion de escritorio.
 
 Instalar Wails:
 
@@ -408,16 +408,15 @@ go vet ./...
 
 - Los instaladores generan token automaticamente.
 - El agente puede restringir el firewall por IP mediante `AllowFrom` o `--allow-from`.
-- La interfaz visual solo escucha en `127.0.0.1`.
+- La aplicacion visual es una ventana de escritorio; la comprobacion del servicio permanece en el equipo local.
 - Las descargas se escriben en un archivo temporal y se renombran atomicamente despues de validar checksum.
 - Las acciones se registran en la auditoria del Control Center.
 
 ### Limitaciones conocidas
 
-- El trafico no usa TLS por defecto.
-- El agente acepta parametros TLS, pero la negociacion end-to-end desde el Control Center debe completarse antes de considerar TLS una proteccion operativa cerrada.
+- TLS es opcional por defecto; el agente y el Control Center soportan TLS end-to-end mediante `wss://`. Activalo al conectar y usa certificados confiables.
 - Los tokens guardados en la base local no estan cifrados en reposo.
-- La politica `CheckOrigin` del WebSocket debe endurecerse para despliegues fuera de una LAN controlada.
+- `CheckOrigin` restringe origenes de navegador no autorizados; aun asi no expongas el puerto directamente a Internet.
 - `--no-auth` elimina la proteccion del agente y no debe usarse en produccion.
 - El control remoto permite operaciones privilegiadas; debe existir autorizacion clara de los usuarios y de la organizacion.
 
@@ -433,29 +432,24 @@ go vet ./...
 
 ## Estructura del repositorio
 
-```text
+~~~text
 lan-commander/
-├── agent/
-│   ├── cmd/lan-agent/          Entrada del agente y gestion del servicio
-│   └── internal/
-│       ├── discovery/          Anuncio mDNS
-│       ├── executor/            Comandos del sistema
-│       ├── filesystem/          Directorios y archivos por bloques
-│       ├── protocol/            Mensajes compartidos
-│       ├── screenshot/          Captura de pantalla
-│       ├── server/              Servidor WebSocket
-│       ├── system/              Metricas
-│       └── ui/                  Interfaz visual local
-├── control-center/
-│   ├── app.go                   Bindings y operaciones del escritorio
-│   ├── backend/                 Cliente, auditoria, sesiones, scripts y WOL
-│   └── frontend/                Svelte, TypeScript, Vite y Tailwind
-├── installers/
-│   ├── windows/                 PowerShell y payload Windows
-│   └── linux/                   Bash y payload Linux
-├── scripts/                     Compilacion reproducible
-└── docs/                        Especificaciones y planes
-```
+├── agent/                         Servicio Go del equipo gestionado
+│   ├── cmd/lan-agent/             Entrada y gestion del servicio
+│   └── internal/                  Discovery, comandos, archivos, protocolo, servidor y metricas
+├── agent-ui/                      Aplicacion visual de escritorio del agente
+│   ├── main.go                    Puente Wails y comprobacion de estado local
+│   └── frontend/                  Svelte + TypeScript embebido en el ejecutable
+├── control-center/                Aplicacion de escritorio del administrador
+│   ├── app.go                     Bindings y operaciones Wails
+│   ├── backend/                    Cliente, auditoria, sesiones, scripts y WOL
+│   └── frontend/                  Svelte, TypeScript, Vite y Tailwind
+├── installers/                    Instaladores y payloads por plataforma
+│   ├── windows/                   PowerShell, servicio y asistente WinForms
+│   └── linux/                     Bash, systemd y asistente Zenity
+├── scripts/                       Compilacion reproducible
+└── docs/                          Instalacion, especificaciones y planes
+~~~
 
 ## Pruebas y verificacion
 
@@ -466,7 +460,7 @@ La verificacion realizada para esta version incluye:
 - `go test ./...` y `go vet ./...` en el Control Center.
 - `npm run check` sin errores ni avisos.
 - `npm run build` del frontend.
-- Build de produccion Wails del Control Center.
+- Compilacion de produccion del Control Center y de `lan-agent-ui`.
 - Compilacion cruzada del agente para Linux amd64.
 - Analisis sintactico de los scripts PowerShell.
 
@@ -493,13 +487,12 @@ El chequeo `bash -n` debe ejecutarse en Linux o WSL; el entorno Windows usado pa
 - Bandeja del sistema para la interfaz visual.
 - Notificaciones de actividad y solicitudes de ayuda.
 - Registro de actividad visible para el usuario final.
-- Botones pendientes en el Control Center para captura, descarga y desconexion.
-- TLS por defecto con validacion de certificados.
-- Cifrado de tokens en reposo.
-- Endurecimiento de `CheckOrigin`.
+- TLS obligatorio por politica en despliegues empresariales.
+- Cifrado de tokens en reposo y pruebas de integracion de instaladores.
 - Mas pruebas de integracion y pruebas reales de instalacion en Windows y Linux.
 
 ## Documentacion relacionada
 
 - [Especificacion de interfaz del agente](docs/superpowers/specs/2026-07-27-agent-client-ui-design.md)
+- [Instalacion grafica](docs/GUI-INSTALLATION.md)
 - [Plan original de la interfaz del agente](docs/superpowers/plans/2026-07-27-agent-client-ui-fase-1.md)

@@ -1,16 +1,23 @@
-# README
+# Control Center
 
-## About
+`control-center` es la aplicacion de escritorio del administrador. Usa Wails para empaquetar el frontend Svelte dentro de un ejecutable nativo; en produccion no abre una pagina visible ni requiere que el usuario navegue a `localhost`.
 
-This is the official Wails Svelte-TS template.
+## Desarrollo
 
-## Live Development
+Desde esta carpeta:
 
-To run in live development mode, run `wails dev` in the project directory. This will run a Vite development
-server that will provide very fast hot reload of your frontend changes. If you want to develop in a browser
-and have access to your Go methods, there is also a dev server that runs on http://localhost:34115. Connect
-to this in your browser, and you can call your Go code from devtools.
+```powershell
+npm.cmd --prefix frontend install
+npm.cmd --prefix frontend run check
+npm.cmd --prefix frontend run build
+go test ./...
+```
 
-## Building
+Para ejecutar la aplicacion durante el desarrollo necesitas el CLI de Wails:
 
-To build a redistributable, production mode package, use `wails build`.
+```powershell
+go install github.com/wailsapp/wails/v2/cmd/wails@v2.13.0
+wails dev
+```
+
+El servidor Vite/localhost que pueda aparecer durante `wails dev` es una herramienta exclusiva de desarrollo. El ejecutable distribuible se compila con `scripts/build-all.ps1` y se entrega en `build/bin/lan-commander.exe`.

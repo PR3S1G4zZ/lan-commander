@@ -1,8 +1,14 @@
 # Artefactos de build
 control-center/build/bin/
 agent/build/
+agent-ui/build/bin/
+agent-ui/frontend/dist/*
+!agent-ui/frontend/dist/.gitkeep
 installers/windows/lan-agent.exe
+installers/windows/lan-agent-ui.exe
 installers/linux/lan-agent-linux
+installers/linux/lan-agent-ui
+.codex-cache/
 
 # Dependencias
 node_modules/
