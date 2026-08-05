@@ -1,7 +1,10 @@
 package filesystem
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +17,8 @@ const (
 	DefaultChunkSize = 64 * 1024
 	// MaxDirEntries limits the number of entries returned per ListDir call.
 	MaxDirEntries = 50
+	// MaxChunkSize prevents excessive allocations from a single request.
+	MaxChunkSize = 4 * 1024 * 1024
 )
 
 // ErrPathTraversal is returned when a path contains traversal sequences.
@@ -114,7 +119,13 @@ func ReadFileChunk(path string, offset int64, chunkSize int) ([]byte, int64, err
 	}
 	fileSize := fi.Size()
 
-	if offset >= fileSize {
+	if offset > fileSize {
+		return nil, fileSize, fmt.Errorf("offset %d beyond file size %d", offset, fileSize)
+	}
+	if offset == fileSize {
+		if fileSize == 0 {
+			return []byte{}, fileSize, nil
+		}
 		return nil, fileSize, fmt.Errorf("offset %d beyond file size %d", offset, fileSize)
 	}
 
@@ -214,4 +225,23 @@ func PathExists(path string, mustBeDir bool) (bool, error) {
 		return false, fmt.Errorf("%q is not a directory", safe)
 	}
 	return true, nil
+}
+
+// FileSHA256 computes the checksum of the complete file.
+func FileSHA256(path string) (string, error) {
+	safe, err := safePath(path)
+	if err != nil {
+		return "", err
+	}
+	f, err := os.Open(safe)
+	if err != nil {
+		return "", fmt.Errorf("cannot open %q for checksum: %w", safe, err)
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", fmt.Errorf("cannot checksum %q: %w", safe, err)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }

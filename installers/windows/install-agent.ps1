@@ -15,6 +15,9 @@
     Puerto distinto:
         .\install-agent.ps1 -Port 9500
 
+    Mostrar el aviso de gestion en la interfaz visual:
+         .\install-agent.ps1 -ManagedByNotice "Nombre de la organizacion"
+
     Restringir el firewall a la IP del equipo administrador (recomendado):
         .\install-agent.ps1 -AllowFrom "192.168.1.10"
 
@@ -29,6 +32,7 @@ param(
     [string]$AuthToken = "",
     [string]$InstallDir = "$env:ProgramFiles\LAN Commander Agent",
     [string]$AllowFrom = "",
+    [string]$ManagedByNotice = "",
     [switch]$NoAuth,
     [switch]$Uninstall
 )
@@ -46,6 +50,7 @@ if ($Uninstall) {
         & $exeDest uninstall 2>$null | Out-Null
     }
     Remove-NetFirewallRule -DisplayName $fwRuleName -ErrorAction SilentlyContinue
+    Remove-ItemProperty -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run" -Name "LANCommanderUI" -ErrorAction SilentlyContinue
     Remove-Item -Recurse -Force $InstallDir -ErrorAction SilentlyContinue
     Write-Host "Agente desinstalado." -ForegroundColor Green
     exit 0
@@ -78,6 +83,17 @@ if (-not (Test-Path $sourceExe)) {
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 Copy-Item -Path $sourceExe -Destination $exeDest -Force
+# Registrar la interfaz para la sesión gráfica de cada usuario. El servicio y
+# la interfaz son procesos separados por el aislamiento de sesión de Windows.
+$runKey = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run"
+New-Item -Path $runKey -Force | Out-Null
+$uiCommand = "`"$exeDest`" --ui --port $Port"
+if ($ManagedByNotice -ne "") {
+    $safeNotice = $ManagedByNotice.Replace('"', '\"')
+    $uiCommand += " --managed-by-notice `"$safeNotice`""
+}
+Set-ItemProperty -Path $runKey -Name "LANCommanderUI" -Value $uiCommand
+Write-Host "  Interfaz visual registrada para iniciar sesion" -ForegroundColor Green
 
 # Abrir el puerto en el Firewall de Windows (entrada, TCP).
 # Se recrea siempre para que -AllowFrom tome efecto en reinstalaciones.

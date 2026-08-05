@@ -2,11 +2,16 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -436,7 +441,9 @@ func (a *App) RequestScreenshot(agentID string) (*protocol.ScreenshotDataPayload
 
 // --- Binding: TransferFile ---
 
-// TransferFile initiates a file transfer from an agent to the local machine.
+// TransferFile downloads a complete file from an agent and stores it atomically
+// at localPath. Chunks are requested sequentially so the client never holds the
+// entire remote file in memory.
 func (a *App) TransferFile(agentID string, remotePath string, localPath string) error {
 	if agentID == "" {
 		return fmt.Errorf("agent ID cannot be empty")
@@ -448,24 +455,117 @@ func (a *App) TransferFile(agentID string, remotePath string, localPath string) 
 		return fmt.Errorf("local path cannot be empty")
 	}
 
-	a.audit.Log("transfer_file", agentID, "user",
-		fmt.Sprintf("Remote: %s -> Local: %s", remotePath, localPath),
-		audit.StatusSuccess)
-
-	// For now, we send a get_file request and expect file chunks back.
-	// A full implementation would reassemble chunks and write to localPath.
-	payload := protocol.GetFilePayload{
-		Path:      remotePath,
-		Offset:    0,
-		ChunkSize: 65536, // 64KB
-	}
-
-	_, err := a.clientMgr.SendRequest(agentID, protocol.MsgGetFile, payload, defaultTimeout)
+	localPath, err := filepath.Abs(localPath)
 	if err != nil {
-		a.audit.Log("transfer_file", agentID, "user", fmt.Sprintf("Failed: %v", err), audit.StatusError)
-		return fmt.Errorf("file transfer failed: %w", err)
+		return fmt.Errorf("invalid local path: %w", err)
+	}
+	parentDir := filepath.Dir(localPath)
+	info, err := os.Stat(parentDir)
+	if err != nil {
+		return fmt.Errorf("local directory is not accessible: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("local path parent is not a directory: %s", parentDir)
 	}
 
+	partFile, err := os.CreateTemp(parentDir, ".lan-commander-download-*")
+	if err != nil {
+		return fmt.Errorf("cannot create temporary download: %w", err)
+	}
+	partPath := partFile.Name()
+	defer os.Remove(partPath)
+
+	const chunkSize = 64 * 1024
+	var offset int64
+	var totalSize int64 = -1
+
+	for {
+		response, requestErr := a.clientMgr.SendRequest(agentID, protocol.MsgGetFile, protocol.GetFilePayload{
+			Path:      remotePath,
+			Offset:    offset,
+			ChunkSize: chunkSize,
+		}, defaultTimeout)
+		if requestErr != nil {
+			_ = partFile.Close()
+			a.audit.Log("transfer_file", agentID, "user", fmt.Sprintf("Failed: %v", requestErr), audit.StatusError)
+			return fmt.Errorf("file transfer failed: %w", requestErr)
+		}
+
+		payloadBytes, marshalErr := json.Marshal(response.Payload)
+		if marshalErr != nil {
+			_ = partFile.Close()
+			return fmt.Errorf("invalid file chunk response: %w", marshalErr)
+		}
+		var chunk protocol.FileChunkPayload
+		if unmarshalErr := json.Unmarshal(payloadBytes, &chunk); unmarshalErr != nil {
+			_ = partFile.Close()
+			return fmt.Errorf("invalid file chunk response: %w", unmarshalErr)
+		}
+		if chunk.Offset != offset {
+			_ = partFile.Close()
+			return fmt.Errorf("file chunk offset mismatch: received %d, expected %d", chunk.Offset, offset)
+		}
+		if totalSize < 0 {
+			totalSize = chunk.TotalSize
+		} else if chunk.TotalSize != totalSize {
+			_ = partFile.Close()
+			return fmt.Errorf("file size changed during transfer")
+		}
+		if totalSize < 0 || offset+int64(len(chunk.Data)) > totalSize {
+			_ = partFile.Close()
+			return fmt.Errorf("invalid file chunk size")
+		}
+		if len(chunk.Data) > 0 {
+			if _, writeErr := partFile.WriteAt(chunk.Data, offset); writeErr != nil {
+				_ = partFile.Close()
+				return fmt.Errorf("cannot write downloaded chunk: %w", writeErr)
+			}
+		}
+		offset += int64(len(chunk.Data))
+		if chunk.Final {
+			if offset != totalSize {
+				_ = partFile.Close()
+				return fmt.Errorf("final chunk ended at %d, expected %d", offset, totalSize)
+			}
+			if chunk.Checksum != "" {
+				if err := verifyFileChecksum(partFile, chunk.Checksum); err != nil {
+					_ = partFile.Close()
+					return err
+				}
+			}
+			break
+		}
+		if len(chunk.Data) == 0 {
+			_ = partFile.Close()
+			return fmt.Errorf("agent returned an empty non-final file chunk")
+		}
+	}
+
+	if err := partFile.Close(); err != nil {
+		return fmt.Errorf("cannot close downloaded file: %w", err)
+	}
+	if err := os.Rename(partPath, localPath); err != nil {
+		return fmt.Errorf("cannot finalize downloaded file %q: %w", localPath, err)
+	}
+
+	a.audit.Log("transfer_file", agentID, "user",
+		fmt.Sprintf("Remote: %s -> Local: %s (%d bytes)", remotePath, localPath, totalSize),
+		audit.StatusSuccess)
+	return nil
+}
+
+func verifyFileChecksum(file *os.File, expected string) error {
+	if _, err := file.Seek(0, 0); err != nil {
+		return fmt.Errorf("cannot verify downloaded file: %w", err)
+	}
+	h := sha256.New()
+	if _, err := io.Copy(h, file); err != nil {
+		return fmt.Errorf("cannot verify downloaded file: %w", err)
+	}
+	actual := hex.EncodeToString(h.Sum(nil))
+	if !strings.EqualFold(actual, expected) {
+		return fmt.Errorf("download checksum mismatch")
+	}
 	return nil
 }
 

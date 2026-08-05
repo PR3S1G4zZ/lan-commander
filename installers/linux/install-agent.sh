@@ -15,6 +15,9 @@
 # Puerto distinto:
 #   sudo ./install-agent.sh --port 9500
 #
+# Mostrar el aviso de gestion en la interfaz visual:
+#   sudo ./install-agent.sh --managed-by-notice "Nombre de la organizacion"
+#
 # Restringir el firewall a la IP del equipo administrador (recomendado):
 #   sudo ./install-agent.sh --allow-from 192.168.1.10
 #
@@ -29,6 +32,7 @@ set -euo pipefail
 PORT="9474"
 AUTH_TOKEN=""
 ALLOW_FROM=""
+MANAGED_BY_NOTICE=""
 NO_AUTH=0
 UNINSTALL=0
 GENERATED_TOKEN=0
@@ -48,6 +52,10 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--allow-from)
 		ALLOW_FROM="$2"
+		shift 2
+		;;
+	--managed-by-notice)
+		MANAGED_BY_NOTICE="$2"
 		shift 2
 		;;
 	--no-auth)
@@ -78,6 +86,7 @@ if [[ "${UNINSTALL}" -eq 1 ]]; then
 	"${DEST}" stop >/dev/null 2>&1 || true
 	"${DEST}" uninstall >/dev/null 2>&1 || true
 	rm -f "${DEST}"
+	rm -f /etc/xdg/autostart/lan-commander-ui.desktop
 	echo "Agente desinstalado."
 	exit 0
 fi
@@ -108,6 +117,24 @@ if [[ ! -f "${SCRIPT_DIR}/${SRC_BIN}" ]]; then
 fi
 
 install -m 755 "${SCRIPT_DIR}/${SRC_BIN}" "${DEST}"
+# Registrar la interfaz visual para sesiones gráficas XDG. El servicio systemd
+# continúa siendo un proceso separado y privilegiado.
+UI_EXEC="${DEST} --ui --port ${PORT}"
+if [[ -n "${MANAGED_BY_NOTICE}" ]]; then
+	UI_EXEC="${UI_EXEC} --managed-by-notice \"${MANAGED_BY_NOTICE}\""
+fi
+install -d -m 755 /etc/xdg/autostart
+cat > /etc/xdg/autostart/lan-commander-ui.desktop <<EOF
+[Desktop Entry]
+Type=Application
+Name=LAN Commander
+Comment=Interfaz de usuario del agente LAN Commander
+Exec=${UI_EXEC}
+Terminal=false
+NoDisplay=false
+X-GNOME-Autostart-enabled=true
+EOF
+echo "  Interfaz visual registrada para iniciar sesion"
 
 # Firewall (best-effort segun lo que haya instalado)
 if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then

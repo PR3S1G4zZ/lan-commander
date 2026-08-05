@@ -22,6 +22,9 @@
     "src/**/*.js",
     "src/**/*.svelte"
   ],
+  "exclude": [
+    "src/lib/backup/**"
+  ],
   "references": [
     {
       "path": "./tsconfig.node.json"

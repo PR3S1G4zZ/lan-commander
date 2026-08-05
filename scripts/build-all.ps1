@@ -1,34 +1,53 @@
 # LAN Commander - Build All
-# Este script compila todo el proyecto
+# Compila los agentes y el Control Center.
 
-Write-Host "╔══════════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host "║      LAN Commander - Build All          ║" -ForegroundColor Cyan
-Write-Host "╚══════════════════════════════════════════╝" -ForegroundColor Cyan
+$ErrorActionPreference = "Stop"
+$repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
+$agentDir = Join-Path $repoRoot "agent"
+$controlCenterDir = Join-Path $repoRoot "control-center"
 
-# 1. Build Agent (Windows)
-Write-Host "`n[1/3] Building Agent (Windows)..." -ForegroundColor Yellow
-Set-Location -LiteralPath "$PSScriptRoot\..\agent"
-go build -ldflags="-s -w" -o build\lan-agent.exe .\cmd\lan-agent\
-if ($?) { Write-Host "  ✅ lan-agent.exe built" -ForegroundColor Green } else { Write-Host "  ❌ FAILED" -ForegroundColor Red }
+Write-Host "LAN Commander - Build All" -ForegroundColor Cyan
 
-# 2. Build Agent (Linux) - cross-compile
-Write-Host "`n[2/3] Building Agent (Linux)..." -ForegroundColor Yellow
-$env:GOOS="linux"; $env:GOARCH="amd64"
-go build -ldflags="-s -w" -o build\lan-agent-linux .\cmd\lan-agent\
-if ($?) { Write-Host "  ✅ lan-agent-linux built" -ForegroundColor Green } else { Write-Host "  ❌ FAILED" -ForegroundColor Red }
-$env:GOOS=""; $env:GOARCH=""
+Push-Location $agentDir
+try {
+    Write-Host "[1/3] Compilando agente Windows..." -ForegroundColor Yellow
+    go build -ldflags="-s -w" -o build\lan-agent.exe .\cmd\lan-agent
+    Copy-Item build\lan-agent.exe ..\installers\windows\lan-agent.exe -Force
+    Write-Host "  OK: agente Windows y payload del instalador" -ForegroundColor Green
 
-# 3. Build Control Center
-Write-Host "`n[3/3] Building Control Center..." -ForegroundColor Yellow
-$env:Path += ";$env:USERPROFILE\go\bin"
-Set-Location -LiteralPath "$PSScriptRoot\..\control-center"
-wails build -f -o build\bin\lan-commander.exe
-if ($?) { Write-Host "  ✅ lan-commander.exe built" -ForegroundColor Green } else { Write-Host "  ❌ FAILED" -ForegroundColor Red }
+    Write-Host "[2/3] Compilando agente Linux amd64..." -ForegroundColor Yellow
+    $previousGoOS = $env:GOOS
+    $previousGoARCH = $env:GOARCH
+    try {
+        $env:GOOS = "linux"
+        $env:GOARCH = "amd64"
+        go build -ldflags="-s -w" -o build\lan-agent-linux .\cmd\lan-agent
+    } finally {
+        $env:GOOS = $previousGoOS
+        $env:GOARCH = $previousGoARCH
+    }
+    Copy-Item build\lan-agent-linux ..\installers\linux\lan-agent-linux -Force
+    Write-Host "  OK: agente Linux y payload del instalador" -ForegroundColor Green
+} finally {
+    Pop-Location
+}
 
-Write-Host "`n╔══════════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host "║          Build Complete!                ║" -ForegroundColor Cyan
-Write-Host "╚══════════════════════════════════════════╝" -ForegroundColor Cyan
-Write-Host "Output files:" -ForegroundColor White
-Write-Host "  agent\build\lan-agent.exe       - Windows Agent" -ForegroundColor White
-Write-Host "  agent\build\lan-agent-linux     - Linux Agent" -ForegroundColor White
-Write-Host "  control-center\build\bin\lan-commander.exe - Control Center" -ForegroundColor White
+Write-Host "[3/3] Compilando Control Center..." -ForegroundColor Yellow
+$wails = Join-Path $env:USERPROFILE "go\bin\wails.exe"
+if (-not (Test-Path $wails)) {
+    $wails = "wails"
+}
+Push-Location $controlCenterDir
+try {
+    & $wails build -f -o lan-commander.exe
+} finally {
+    Pop-Location
+}
+Write-Host "  OK: Control Center" -ForegroundColor Green
+
+Write-Host "Build terminado." -ForegroundColor Cyan
+Write-Host "  agent\build\lan-agent.exe"
+Write-Host "  agent\build\lan-agent-linux"
+Write-Host "  installers\windows\lan-agent.exe"
+Write-Host "  installers\linux\lan-agent-linux"
+Write-Host "  control-center\build\bin\lan-commander.exe"

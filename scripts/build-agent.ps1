@@ -1,25 +1,40 @@
-# LAN Commander - Build Agent (cross-platform)
+# LAN Commander - Build Agent
 
 param(
-    [string]$Target = "all" # windows, linux, or all
+    [ValidateSet("windows", "linux", "all")]
+    [string]$Target = "all"
 )
 
-Write-Host "LAN Commander - Building Agent" -ForegroundColor Cyan
+$ErrorActionPreference = "Stop"
+$repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
+$agentDir = Join-Path $repoRoot "agent"
 
-Set-Location -LiteralPath "$PSScriptRoot\..\agent"
+Push-Location $agentDir
+try {
+    if ($Target -eq "windows" -or $Target -eq "all") {
+        Write-Host "Compilando agente Windows..." -ForegroundColor Yellow
+        go build -ldflags="-s -w" -o build\lan-agent.exe .\cmd\lan-agent
+        Copy-Item build\lan-agent.exe ..\installers\windows\lan-agent.exe -Force
+        Write-Host "OK: Windows" -ForegroundColor Green
+    }
 
-if ($Target -eq "windows" -or $Target -eq "all") {
-    Write-Host "`nBuilding for Windows..." -ForegroundColor Yellow
-    go build -ldflags="-s -w" -o build\lan-agent.exe .\cmd\lan-agent\
-    if ($?) { Write-Host "  ✅ lan-agent.exe (Windows)" -ForegroundColor Green }
+    if ($Target -eq "linux" -or $Target -eq "all") {
+        Write-Host "Compilando agente Linux amd64..." -ForegroundColor Yellow
+        $previousGoOS = $env:GOOS
+        $previousGoARCH = $env:GOARCH
+        try {
+            $env:GOOS = "linux"
+            $env:GOARCH = "amd64"
+            go build -ldflags="-s -w" -o build\lan-agent-linux .\cmd\lan-agent
+        } finally {
+            $env:GOOS = $previousGoOS
+            $env:GOARCH = $previousGoARCH
+        }
+        Copy-Item build\lan-agent-linux ..\installers\linux\lan-agent-linux -Force
+        Write-Host "OK: Linux" -ForegroundColor Green
+    }
+} finally {
+    Pop-Location
 }
 
-if ($Target -eq "linux" -or $Target -eq "all") {
-    Write-Host "`nBuilding for Linux..." -ForegroundColor Yellow
-    $env:GOOS="linux"; $env:GOARCH="amd64"
-    go build -ldflags="-s -w" -o build\lan-agent-linux .\cmd\lan-agent\
-    if ($?) { Write-Host "  ✅ lan-agent-linux (Linux)" -ForegroundColor Green }
-    $env:GOOS=""; $env:GOARCH=""
-}
-
-Write-Host "`nDone!" -ForegroundColor Cyan
+Write-Host "Build del agente terminado." -ForegroundColor Cyan

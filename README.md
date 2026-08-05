@@ -1,430 +1,505 @@
 # LAN Commander
 
-Herramienta de administración remota para equipos en una misma red local. Un panel
-de escritorio controla agentes instalados en cada PC: ejecuta comandos, explora
-archivos, captura pantalla, monitorea recursos y despierta equipos por Wake-on-LAN.
+LAN Commander es una plataforma de administracion remota para equipos conectados a una misma red local. Un **Control Center** permite gestionar agentes instalados en PCs Windows y Linux: ejecutar comandos, consultar recursos, explorar archivos, transferir ficheros, capturar pantalla, ejecutar scripts y enviar Wake-on-LAN.
 
-Pensada para redes donde no quieres exponer SSH ni depender de un servicio en la
-nube: los agentes se anuncian por mDNS y todo el tráfico se queda en la LAN.
+El proyecto esta pensado para redes internas donde no se quiere depender de SSH ni de un servicio en la nube. El descubrimiento usa mDNS y las conexiones se inician desde el equipo administrador.
 
-> **Estado del proyecto.** El panel de administración y el agente son funcionales.
-> La interfaz para el usuario final de cada PC está diseñada y planificada, pero
-> **todavía no implementada** — ver [Estado y hoja de ruta](#estado-y-hoja-de-ruta).
-> Este README distingue explícitamente lo que ya funciona de lo que está en diseño.
+> Estado actual: el Control Center, el agente como servicio, la transferencia de archivos por bloques y la interfaz visual local del agente estan implementados. La interfaz del agente muestra transparencia y estado del servicio; las notificaciones, el registro de actividad local y la bandeja del sistema siguen siendo mejoras futuras.
 
----
-
-## Índice
+## Indice
 
 - [Arquitectura](#arquitectura)
 - [Componentes](#componentes)
+- [Flujo general](#flujo-general)
 - [Casos de uso](#casos-de-uso)
-- [Requisitos](#requisitos)
-- [Instalación](#instalación)
-- [Uso del Control Center](#uso-del-control-center)
-- [Modelo de seguridad](#modelo-de-seguridad)
-- [Compilar desde el código](#compilar-desde-el-código)
-- [Estado y hoja de ruta](#estado-y-hoja-de-ruta)
-- [Documentación adicional](#documentación-adicional)
-
----
+- [Tecnologias](#tecnologias)
+- [Instalacion paso a paso](#instalacion-paso-a-paso)
+- [Primer uso](#primer-uso)
+- [Compilar desde el codigo](#compilar-desde-el-codigo)
+- [Seguridad](#seguridad)
+- [Estructura del repositorio](#estructura-del-repositorio)
+- [Pruebas y verificacion](#pruebas-y-verificacion)
+- [Estado y proximas mejoras](#estado-y-proximas-mejoras)
 
 ## Arquitectura
 
-Dos piezas: un **Control Center** en el equipo del administrador, y un **agente**
-instalado como servicio en cada equipo gestionado.
+La solucion tiene tres elementos principales:
+
+1. **Control Center**: aplicacion de escritorio para el administrador.
+2. **Agente**: servicio privilegiado instalado en cada equipo gestionado.
+3. **Interfaz visual del agente**: interfaz web local que se abre en el navegador del usuario y muestra estado, version, puerto y aviso de gestion.
 
 ```mermaid
 graph LR
-    subgraph admin["Equipo del administrador"]
-        CC["Control Center<br/>(Wails: Go + Svelte)"]
-        DB[("SQLite<br/>sesiones + auditoría")]
+    subgraph admin["Equipo administrador"]
+        CC["Control Center<br/>Wails + Go + Svelte"]
+        DB[("SQLite<br/>sesiones y auditoria")]
         CC <--> DB
     end
 
-    subgraph pc1["PC gestionada 1"]
-        A1["lan-agent<br/>(servicio, SYSTEM)"]
+    subgraph win["Equipo gestionado Windows"]
+        WS["Servicio LANCommanderAgent"]
+        WUI["Interfaz visual local<br/>navegador + --ui"]
+        WS -.-> WUI
     end
 
-    subgraph pc2["PC gestionada 2"]
-        A2["lan-agent<br/>(servicio, root)"]
+    subgraph linux["Equipo gestionado Linux"]
+        LS["Servicio systemd LANCommanderAgent"]
+        LUI["Interfaz visual local<br/>navegador + --ui"]
+        LS -.-> LUI
     end
 
-    CC -->|"WebSocket :9474<br/>+ token"| A1
-    CC -->|"WebSocket :9474<br/>+ token"| A2
-    A1 -.->|"mDNS<br/>_lan-commander._tcp"| CC
-    A2 -.->|"mDNS"| CC
-    CC ==>|"Wake-on-LAN<br/>UDP broadcast"| pc2
+    CC -->|"WebSocket TCP 9474<br/>token"| WS
+    CC -->|"WebSocket TCP 9474<br/>token"| LS
+    WS -.->|"mDNS"| CC
+    LS -.->|"mDNS"| CC
+    CC -->|"Wake-on-LAN UDP"| win
+    CC -->|"Wake-on-LAN UDP"| linux
 ```
 
-El administrador **inicia** todas las conexiones. El agente es un servidor: escucha
-y responde, nunca llama hacia afuera. Lo único que emite por su cuenta es el anuncio
-mDNS que permite descubrirlo, y actualizaciones de estado a quien ya esté conectado.
-
-### Flujo de una conexión
-
-```mermaid
-sequenceDiagram
-    participant CC as Control Center
-    participant Ag as lan-agent
-
-    Note over Ag: Se anuncia por mDNS en la LAN
-    CC->>Ag: WebSocket connect :9474
-    Ag-->>CC: auth_required
-    CC->>Ag: auth { token }
-    Ag-->>CC: auth_ok
-    Ag-->>CC: agent_info (hostname, OS, versión)
-    loop cada 2 s
-        Ag-->>CC: system_update (CPU, RAM, disco)
-    end
-    CC->>Ag: exec_command { "ipconfig /all" }
-    Ag-->>CC: command_result { stdout, stderr, exit_code }
-```
-
-Si el agente no tiene token configurado acepta conexiones anónimas, pero los
-instaladores ya no permiten esa configuración por defecto — ver
-[Modelo de seguridad](#modelo-de-seguridad).
-
----
+El servicio del agente trabaja en segundo plano y no necesita que un usuario haya iniciado sesion. La interfaz visual es un modo separado del mismo binario y solo se inicia en una sesion grafica.
 
 ## Componentes
 
-### `control-center/` — Panel de administración
+### Control Center
 
-App de escritorio nativa hecha con [Wails](https://wails.io) (Go + Svelte 5 +
-Tailwind 4). No es un servidor web: es un `.exe` con WebView2.
+Aplicacion de escritorio construida con Wails. Incluye:
 
-| Paquete | Responsabilidad |
-|---|---|
-| `backend/client` | Conexiones WebSocket a los agentes, heartbeat, reconexión |
-| `backend/discovery` | Descubrimiento por mDNS, reescaneo cada 30 s |
-| `backend/protocol` | Tipos de mensaje compartidos con el agente |
-| `backend/session` | Sesiones guardadas (host, puerto, token) en SQLite |
-| `backend/audit` | Registro de auditoría en SQLite + buffer en memoria |
-| `backend/scripting` | Ejecución de scripts multi-línea sobre uno o varios agentes |
-| `backend/wol` | Envío de paquetes mágicos Wake-on-LAN |
+- Descubrimiento de agentes por mDNS.
+- Conexion WebSocket y autenticacion por token.
+- Dashboard de CPU, memoria, discos, red y uptime.
+- Ejecucion de comandos individuales y multi-equipo.
+- Explorador de archivos.
+- Transferencia de archivos por bloques con reensamblado y verificacion SHA-256.
+- Captura de pantalla.
+- Ejecucion de scripts guardados.
+- Sesiones persistentes en SQLite.
+- Registro de auditoria.
+- Wake-on-LAN.
 
-Datos en `%APPDATA%\LAN Commander\` (Windows) — `lan-commander.db`, `audit.db` y
-`scripts/`.
+### Agente
 
-### `agent/` — Agente por equipo
+Binario Go que puede ejecutarse en primer plano o instalarse como servicio de sistema. Sus capacidades incluyen:
 
-Binario Go único que se instala como servicio de Windows o unidad systemd. Sin
-ventana ni interfaz: corre en segundo plano desde el arranque.
+- Servidor WebSocket para operaciones remotas.
+- Autenticacion por token.
+- Ejecucion de comandos con timeout.
+- Listado, lectura y escritura de archivos por bloques.
+- Captura de pantalla.
+- Metricas del sistema.
+- Anuncio mDNS.
+- Interfaz visual local con `--ui`.
 
-| Paquete | Responsabilidad |
-|---|---|
-| `internal/server` | Servidor WebSocket, autenticación, enrutado de mensajes |
-| `internal/executor` | Ejecución de comandos (cmd/powershell/bash) con timeout |
-| `internal/filesystem` | Listado de directorios y transferencia de archivos por trozos |
-| `internal/screenshot` | Captura de pantalla (PNG) |
-| `internal/system` | Métricas: CPU, RAM, discos, red, uptime |
-| `internal/discovery` | Anuncio mDNS |
+### Interfaz visual del agente
 
-### `installers/` — Instaladores por plataforma
+El modo `--ui` inicia un servidor HTTP enlazado exclusivamente a `127.0.0.1`, abre el navegador predeterminado y consulta el estado local del servicio cada pocos segundos.
 
-`install-agent.ps1` (Windows, requiere administrador) e `install-agent.sh` (Linux,
-requiere root). Instalan el binario, registran el servicio, abren el puerto en el
-firewall y generan el token de acceso.
+Actualmente muestra:
 
----
+- Estado del servicio.
+- Ultima comprobacion.
+- Version del agente.
+- Puerto configurado.
+- Aviso de la organizacion que gestiona el equipo.
+
+No ejecuta comandos remotos ni expone un panel de administracion. El control remoto continua perteneciendo al Control Center.
+
+## Flujo general
+
+### Conexion y autenticacion
+
+```mermaid
+sequenceDiagram
+    participant U as Administrador
+    participant CC as Control Center
+    participant A as Agente
+    participant M as mDNS
+
+    A->>M: Anuncia _lan-commander._tcp
+    CC->>M: Busca agentes disponibles
+    M-->>CC: Host, puerto y nombre
+    U->>CC: Selecciona el equipo
+    CC->>A: Abre WebSocket
+    A-->>CC: auth_required
+    CC->>A: Envia token
+    A-->>CC: auth_ok
+    A-->>CC: agent_info
+    loop Cada 2 segundos
+        A-->>CC: system_update
+    end
+    U->>CC: Solicita una operacion
+    CC->>A: Envia mensaje protocolizado
+    A-->>CC: Devuelve resultado y auditoria
+```
+
+### Instalacion y primer arranque
+
+```mermaid
+flowchart TD
+    A[Descargar binario y script] --> B{Sistema operativo}
+    B -->|Windows| C[Ejecutar PowerShell como administrador]
+    B -->|Linux| D[Ejecutar script como root]
+    C --> E[Copiar lan-agent.exe]
+    D --> F[Copiar lan-agent-linux]
+    E --> G[Registrar servicio Windows]
+    F --> H[Registrar servicio systemd]
+    G --> I[Crear regla de firewall]
+    H --> J[Configurar firewall disponible]
+    I --> K[Registrar interfaz en HKLM Run]
+    J --> L[Registrar .desktop en XDG autostart]
+    K --> M[Iniciar servicio e interfaz al iniciar sesion]
+    L --> M
+    M --> N[Mostrar token de acceso]
+    N --> O[Agregar equipo desde Control Center]
+```
+
+### Transferencia de archivos
+
+```mermaid
+flowchart LR
+    A[Usuario elige archivo remoto] --> B[Control Center crea archivo temporal]
+    B --> C[Solicita offset 0]
+    C --> D[Agente lee bloque de hasta 64 KB]
+    D --> E{Ultimo bloque?}
+    E -->|No| F[Escribe bloque en offset local]
+    F --> G[Solicita siguiente offset]
+    G --> D
+    E -->|Si| H[Agente calcula SHA-256 completo]
+    H --> I[Control Center verifica checksum]
+    I --> J[Renombra temporal de forma atomica]
+    J --> K[Registra resultado en auditoria]
+```
 
 ## Casos de uso
 
-### 1. Aula o laboratorio de informática
+| Tipo de uso | Necesidad | Funcionalidades principales |
+|---|---|---|
+| Soporte tecnico | Diagnosticar un equipo sin desplazarse | Metricas, comandos, explorador y captura de pantalla |
+| Aula o laboratorio | Administrar muchos equipos a la vez | Multi-Exec, scripts, Wake-on-LAN y descubrimiento mDNS |
+| Mantenimiento | Ejecutar tareas fuera de horario | Scripts, comandos, transferencia y auditoria |
+| Inventario | Saber que equipos estan disponibles | mDNS, informacion del sistema y sesiones guardadas |
+| Oficina pequena | Resolver incidencias con poca infraestructura | Servicio local, token por equipo y Control Center de escritorio |
+| Red de pruebas | Administrar dispositivos dentro de una LAN aislada | Instaladores, autenticacion opcional solo para laboratorio y firewall |
 
-Un docente necesita apagar 30 equipos al final del día, o instalar la misma
-herramienta en todos antes de una clase.
+### Flujo recomendado de soporte
 
-- **Multi-Exec** ejecuta el mismo comando en todos los agentes seleccionados a la vez.
-- **Wake-on-LAN** los despierta por la mañana sin recorrer el aula.
-- **Scripts** guarda las tareas repetidas (limpiar perfiles, actualizar software).
-
-### 2. Soporte técnico en oficina pequeña
-
-Un usuario reporta que "algo va lento" y no sabe explicar más.
-
-- El **Dashboard** muestra CPU, RAM y disco en vivo de ese equipo.
-- La **Terminal** permite diagnosticar sin levantarse del escritorio.
-- El **explorador de archivos** recupera un documento que el usuario guardó mal.
-- La **captura de pantalla** muestra qué error está viendo realmente.
-
-### 3. Mantenimiento fuera de horario
-
-Actualizar equipos cuando nadie los está usando.
-
-- Wake-on-LAN los enciende.
-- Un script se ejecuta en toda la flota.
-- El **registro de auditoría** deja constancia de qué se hizo, en qué equipo y cuándo.
-
-### 4. Inventario de red
-
-Saber qué hay conectado y con qué características.
-
-- El descubrimiento mDNS lista los agentes disponibles sin configuración.
-- `system_info` reporta sistema operativo, arquitectura, hostname, IP y MAC.
-
-> **Caso de uso en diseño — transparencia para el usuario.** Hoy el usuario de un
-> equipo gestionado no puede saber que el agente corre ni que se capturó su pantalla.
-> La [interfaz de cliente](docs/superpowers/specs/2026-07-27-agent-client-ui-design.md)
-> resuelve esto con un ícono de bandeja, notificaciones y un registro local
-> consultable. Está especificada y planificada, no implementada.
-
----
-
-## Requisitos
-
-**Equipo administrador**
-- Windows 10/11 con WebView2 (viene preinstalado en Windows 11)
-
-**Equipos gestionados**
-- Windows 10/11, o Linux con systemd
-- Permisos de administrador/root para instalar el servicio
-- Puerto TCP libre (9474 por defecto)
-- Todos en la misma red local (mDNS no cruza routers sin configuración extra)
-
----
-
-## Instalación
-
-### 1. Instalar el agente en cada equipo gestionado
-
-**Windows** — PowerShell **como administrador**:
-
-```powershell
-cd installers\windows
-.\install-agent.ps1 -ManagedByNotice "Nombre de tu organización"
+```mermaid
+flowchart TD
+    A[Detectar equipo por mDNS] --> B[Conectar con token]
+    B --> C[Revisar CPU, RAM, disco y red]
+    C --> D{Se necesita diagnostico?}
+    D -->|Si| E[Ejecutar comando o script]
+    D -->|No| F[Resolver solicitud del usuario]
+    E --> G{Se necesita evidencia visual?}
+    G -->|Si| H[Capturar pantalla]
+    G -->|No| I[Registrar resultado]
+    H --> I
+    F --> I
+    I --> J[Auditoria y cierre]
 ```
 
-El instalador copia el binario a `Program Files`, registra el servicio
-`LANCommanderAgent`, abre el puerto en el firewall y **genera un token de acceso
-aleatorio que muestra al final**. Guárdalo: no se vuelve a mostrar y sin él el
-Control Center no puede conectarse.
+## Tecnologias
 
-Opciones útiles:
+| Capa | Tecnologia | Uso |
+|---|---|---|
+| Control Center | Go 1.25+ | Backend, sesiones, auditoria y operaciones |
+| Escritorio | Wails v2.13 | Empaquetado de Go con WebView2 en Windows |
+| Frontend | Svelte 5, TypeScript, Vite 8 | Interfaz del Control Center |
+| Estilos | Tailwind CSS 4 | Estilos del frontend |
+| Agente | Go 1.26+ | Servicio multiplataforma |
+| Comunicacion | WebSocket sobre TCP | Operaciones remotas y eventos |
+| Descubrimiento | mDNS | Deteccion automatica dentro de la LAN |
+| Persistencia | SQLite mediante modernc.org/sqlite | Sesiones, scripts y auditoria |
+| Interfaz del agente | HTTP local + HTML/CSS/JavaScript | Estado visible para el usuario final |
+| Servicios | kardianos/service | Windows Service y systemd |
+| Red local | UDP Wake-on-LAN | Encendido remoto |
+
+### Puertos y protocolos
+
+| Elemento | Valor |
+|---|---|
+| Servicio del agente | TCP `9474` por defecto |
+| Descubrimiento | mDNS `_lan-commander._tcp` |
+| Interfaz visual | Puerto local aleatorio en `127.0.0.1` |
+| Wake-on-LAN | UDP broadcast |
+
+## Instalacion paso a paso
+
+Los scripts esperan encontrar el binario correspondiente en la misma carpeta:
+
+- Windows: `installers/windows/install-agent.ps1` junto a `lan-agent.exe`.
+- Linux: `installers/linux/install-agent.sh` junto a `lan-agent-linux`.
+
+### Windows 10/11
+
+1. Descarga o genera `lan-agent.exe`.
+2. Abre PowerShell **como administrador**.
+3. Entra en `installers/windows`.
+4. Ejecuta el instalador indicando la organizacion, si aplica:
 
 ```powershell
-# Usar un token propio, el mismo para toda la flota
+.\install-agent.ps1 -ManagedByNotice "Nombre de la organizacion"
+```
+
+5. El instalador:
+   - Genera un token aleatorio si no proporcionas uno.
+   - Copia el agente a `Program Files\LAN Commander Agent`.
+   - Registra el servicio `LANCommanderAgent`.
+   - Abre el puerto TCP en el Firewall de Windows.
+   - Registra la interfaz visual para iniciar sesion.
+   - Muestra el token una sola vez al terminar.
+6. Guarda el token y usalo al agregar el equipo en el Control Center.
+
+Opciones habituales:
+
+```powershell
+# Token propio
 .\install-agent.ps1 -AuthToken "un-secreto-largo"
 
-# Restringir el firewall a la IP del administrador (recomendado)
-.\install-agent.ps1 -AllowFrom "192.168.1.10"
-
-# Puerto distinto
+# Puerto diferente
 .\install-agent.ps1 -Port 9500
 
-# Desinstalar
+# Permitir solo al equipo administrador
+.\install-agent.ps1 -AllowFrom "192.168.1.10"
+
+# Quitar el agente, el servicio, el firewall y la interfaz visual
 .\install-agent.ps1 -Uninstall
 ```
 
-**Linux** — como root:
+La interfaz visual se abre en el navegador al iniciar sesion. El servicio continua activo aunque el usuario cierre el navegador.
+
+### Linux con systemd
+
+1. Confirma que el equipo usa systemd y tiene una sesion grafica si quieres la interfaz visual.
+2. Descarga o genera `lan-agent-linux`.
+3. Abre una terminal como root.
+4. Entra en `installers/linux`.
+5. Ejecuta:
 
 ```bash
-cd installers/linux
-sudo ./install-agent.sh
+chmod +x install-agent.sh
+sudo ./install-agent.sh --managed-by-notice "Nombre de la organizacion"
 ```
 
-Mismas opciones en formato largo: `--auth-token`, `--allow-from`, `--port`,
-`--uninstall`.
+6. El instalador:
+   - Copia el binario a `/usr/local/bin/lan-agent`.
+   - Registra el servicio `LANCommanderAgent`.
+   - Configura ufw o firewalld si estan disponibles.
+   - Registra `/etc/xdg/autostart/lan-commander-ui.desktop`.
+   - Muestra el token generado.
+7. Guarda el token y agregalo en el Control Center.
 
-> ⚠️ **No uses `-NoAuth` / `--no-auth` fuera de pruebas en red aislada.** Sin token,
-> cualquier equipo de la red puede ejecutar comandos como SYSTEM/root en esa máquina.
+Opciones habituales:
 
-### 2. Ejecutar el Control Center
+```bash
+# Token propio
+sudo ./install-agent.sh --auth-token "un-secreto-largo"
 
-En el equipo del administrador, ejecuta `control-center.exe`. No requiere
-instalación.
+# Puerto diferente
+sudo ./install-agent.sh --port 9500
 
-Los agentes de la red deberían aparecer solos por descubrimiento mDNS. Para
-agregarlos a mano, o si mDNS está bloqueado, usa el botón de conexión e introduce
-IP, puerto y el token que te dio el instalador.
+# Permitir solo al equipo administrador
+sudo ./install-agent.sh --allow-from 192.168.1.10
 
-### 3. Guardar las sesiones
+# Desinstalar servicio, binario e interfaz visual
+sudo ./install-agent.sh --uninstall
+```
 
-En **Settings → Saved Sessions**, guarda cada equipo con su host, puerto, nombre y
-**token**. Así el Control Center se reconecta solo en los siguientes arranques. Una
-sesión guardada sin token no podrá reconectarse a un agente protegido.
+En un servidor Linux sin entorno grafico, el servicio remoto funciona normalmente; solo se omite la interfaz visual local.
 
----
+### Autenticacion sin token
 
-## Uso del Control Center
+Los instaladores exigen token por defecto. `-NoAuth` en Windows o `--no-auth` en Linux solo debe usarse en una red de laboratorio aislada:
 
-| Vista | Para qué sirve |
-|---|---|
-| **Dashboard** | Estado de todos los agentes: CPU, RAM, discos, red, en vivo |
-| **Terminal** | Ejecutar comandos en un agente y ver la salida |
-| **Files** | Explorar el sistema de archivos del agente y descargar archivos |
-| **Multi-Exec** | Ejecutar un comando en varios agentes a la vez |
-| **Scripts** | Guardar y ejecutar secuencias de comandos |
-| **Audit** | Historial de todo lo que se hizo, con equipo, acción y resultado |
-| **Settings** | Sesiones guardadas y Wake-on-LAN |
+```powershell
+.\install-agent.ps1 -NoAuth
+```
 
-**Wake-on-LAN** necesita la MAC del equipo destino y que su BIOS/UEFI tenga WoL
-habilitado. La IP de broadcast por defecto (`255.255.255.255`) funciona en la mayoría
-de redes planas; en redes segmentadas usa la de la subred del destino.
+```bash
+sudo ./install-agent.sh --no-auth
+```
 
----
+Sin token, cualquier equipo que alcance el puerto puede intentar ejecutar operaciones con los permisos del servicio.
 
-## Modelo de seguridad
+## Primer uso
 
-Conviene entender bien esto antes de desplegar, porque el agente es una herramienta
-muy potente por diseño.
+1. Ejecuta `control-center\build\bin\lan-commander.exe`.
+2. Espera a que los agentes aparezcan por mDNS.
+3. Selecciona un equipo descubierto o abre la conexion manual.
+4. Introduce host, puerto y token.
+5. Comprueba el estado del equipo.
+6. Guarda la sesion para reconectar automaticamente.
+7. Usa la auditoria para revisar las operaciones realizadas.
 
-**Lo que el agente permite a quien se autentique**
-- Ejecutar cualquier comando, **como SYSTEM en Windows o root en Linux**, sin lista
-  blanca ni sandbox
-- Leer y escribir **cualquier ruta absoluta** del sistema
-- Capturar la pantalla en cualquier momento, sin aviso al usuario
+Conexion manual por defecto:
 
-Es decir: **el token de un agente equivale a control administrativo total de ese
-equipo.** Trátalo como una contraseña de administrador.
+- Host: IP del equipo gestionado.
+- Puerto: `9474`.
+- Token: el mostrado por el instalador.
 
-**Protecciones actuales**
-- Token obligatorio: los instaladores generan uno aleatorio si no le pasas uno
-- `-AllowFrom` / `--allow-from` restringe el firewall a la IP del administrador
-- Todas las acciones quedan en el registro de auditoría del Control Center
+## Compilar desde el codigo
 
-**Limitaciones que debes conocer**
+### Requisitos
 
-| Limitación | Implicación | Mitigación |
-|---|---|---|
-| **Sin cifrado por defecto** | El tráfico va en `ws://` plano; quien esnife la red ve comandos y contenido de archivos | Usar `--tls-cert`/`--tls-key`, o confiar solo en redes controladas |
-| **Tokens en texto plano** | `lan-commander.db` guarda los tokens sin cifrar; copiar ese archivo compromete la flota | Restringir el acceso al equipo administrador |
-| **`CheckOrigin` permisivo** | Una página web maliciosa en la LAN puede intentar abrir un WebSocket al agente | El token lo impide; no instales agentes sin token |
-| **Sin aviso al usuario** | El usuario del equipo no sabe que lo están monitoreando | Resuelto por la [interfaz de cliente](docs/superpowers/specs/2026-07-27-agent-client-ui-design.md), en diseño |
+- Windows 10/11 para compilar y ejecutar el Control Center.
+- Go 1.25 o superior para el Control Center.
+- Go 1.26 o superior para el agente.
+- Node.js 20 o superior y npm.
+- Wails CLI v2.13 o compatible.
+- WebView2 para ejecutar el Control Center en Windows.
+- No se necesita un compilador C adicional para compilar el agente y su interfaz web local.
 
-**Recomendaciones de despliegue**
-1. Un token distinto por equipo, no uno compartido para toda la flota
-2. `--allow-from` con la IP del administrador siempre que sea posible
-3. TLS si la red no es de confianza
-4. Informar por escrito a los usuarios de que sus equipos están gestionados — en
-   muchas jurisdicciones es obligatorio, no opcional
+Instalar Wails:
 
-> **Mejora recomendada:** sustituir tokens por identidad mTLS por equipo. Cada agente
-> genera su par de claves al instalarse y el administrador firma su certificado. Da
-> cifrado en tránsito, elimina el secreto compartido, permite revocar un equipo
-> concreto sin rotar la flota entera, y da identidad estable al audit log sin depender
-> de IP ni hostname. El momento natural para hacerlo es una reinstalación de flota.
-> Detallado en la sección "Trabajo futuro relacionado" de la
-> [especificación de la interfaz de cliente](docs/superpowers/specs/2026-07-27-agent-client-ui-design.md).
-
----
-
-## Compilar desde el código
-
-### Requisitos de compilación
-
-- **Go 1.26+**
-- **Node.js 20+** y npm (para el frontend del Control Center)
-- **Wails CLI**: `go install github.com/wailsapp/wails/v2/cmd/wails@latest`
-  (queda en `%USERPROFILE%\go\bin`, que puede no estar en el `PATH`)
-- **Un compilador C (MinGW-w64 o TDM-GCC)** — *solo* necesario para la interfaz de
-  cliente del agente, que usa Fyne y requiere CGO. El agente y el Control Center
-  actuales compilan sin él.
+```powershell
+go install github.com/wailsapp/wails/v2/cmd/wails@v2.13.0
+```
 
 ### Compilar todo
+
+Desde la raiz del repositorio:
 
 ```powershell
 .\scripts\build-all.ps1
 ```
 
-Compila el agente para Windows y Linux, y el Control Center. Salidas en
-`agent\build\` y `control-center\build\bin\`.
+Salidas principales:
 
-### Compilar por separado
+```text
+agent\build\lan-agent.exe
+agent\build\lan-agent-linux
+installers\windows\lan-agent.exe
+installers\linux\lan-agent-linux
+control-center\build\bin\lan-commander.exe
+```
+
+### Compilar solo el agente
 
 ```powershell
-# Solo el agente, ambas plataformas
-.\scripts\build-agent.ps1
-
-# Solo el agente para Linux
+.\scripts\build-agent.ps1 -Target windows
 .\scripts\build-agent.ps1 -Target linux
+.\scripts\build-agent.ps1 -Target all
 ```
 
-```bash
-# Control Center (desde control-center/)
-wails build
+### Verificar frontend
 
-# Desarrollo con recarga en vivo
-wails dev
+```powershell
+cd control-center\frontend
+npm install
+npm run check
+npm run build
 ```
 
-> `wails build` en este proyecto ha requerido una terminal **con permisos de
-> administrador**. Si falla sin un motivo claro, prueba eso antes de investigar más.
+### Verificar Go
 
-### Pruebas
+```powershell
+cd agent
+go test -p 1 ./... -race
+go vet ./...
 
-```bash
-cd agent && go test ./... -race
+cd ..\control-center
+go test ./...
+go vet ./...
 ```
 
----
+## Seguridad
 
-## Estado y hoja de ruta
+### Protecciones actuales
 
-### Funciona hoy
+- Los instaladores generan token automaticamente.
+- El agente puede restringir el firewall por IP mediante `AllowFrom` o `--allow-from`.
+- La interfaz visual solo escucha en `127.0.0.1`.
+- Las descargas se escriben en un archivo temporal y se renombran atomicamente despues de validar checksum.
+- Las acciones se registran en la auditoria del Control Center.
 
-- ✅ Agente como servicio en Windows y Linux, con arranque automático
-- ✅ Descubrimiento mDNS y conexión manual
-- ✅ Autenticación por token, obligatoria desde los instaladores
-- ✅ Ejecución de comandos individual y multi-equipo
-- ✅ Explorador de archivos y descarga por trozos
-- ✅ Captura de pantalla (backend; sin botón en la UI todavía)
-- ✅ Monitoreo de CPU, RAM, discos y red
-- ✅ Wake-on-LAN
-- ✅ Sesiones guardadas y registro de auditoría en SQLite
-- ✅ Scripts multi-línea sobre uno o varios agentes
+### Limitaciones conocidas
 
-### En diseño, no implementado
+- El trafico no usa TLS por defecto.
+- El agente acepta parametros TLS, pero la negociacion end-to-end desde el Control Center debe completarse antes de considerar TLS una proteccion operativa cerrada.
+- Los tokens guardados en la base local no estan cifrados en reposo.
+- La politica `CheckOrigin` del WebSocket debe endurecerse para despliegues fuera de una LAN controlada.
+- `--no-auth` elimina la proteccion del agente y no debe usarse en produccion.
+- El control remoto permite operaciones privilegiadas; debe existir autorizacion clara de los usuarios y de la organizacion.
 
-- 🚧 **Interfaz de cliente para el usuario final** — ícono de bandeja, notificaciones
-  de actividad, registro local consultable, diagnóstico y mantenimiento de
-  autoservicio, solicitudes de ayuda al administrador.
-  [Especificación](docs/superpowers/specs/2026-07-27-agent-client-ui-design.md) ·
-  [Plan de la Fase 1](docs/superpowers/plans/2026-07-27-agent-client-ui-fase-1.md)
+### Recomendaciones de despliegue
 
-  **Bloqueado:** requiere un compilador C en el entorno de compilación (Fyne necesita
-  CGO en Windows). La verificación de viabilidad no ha podido completarse.
-
-### Deuda conocida
-
-- `RequestScreenshot`, `TransferFile` y `DisconnectAgent` existen en el backend pero
-  no tienen botón en la interfaz
-- `TransferFile` está incompleto: solicita el archivo pero no reensambla los trozos
-  ni los escribe a disco
-- `control-center/frontend/src/lib/backup/` es una copia muerta que rompe
-  `svelte-check`; nada la importa
-- El explorador de archivos abre en `/`, que no corresponde a ninguna unidad en
-  Windows
-- Sin cifrado en tránsito por defecto
-
----
-
-## Documentación adicional
-
-| Documento | Contenido |
-|---|---|
-| [Especificación de la interfaz de cliente](docs/superpowers/specs/2026-07-27-agent-client-ui-design.md) | Diseño completo: arquitectura, canal local, modelo de privilegios, textos de UI |
-| [Plan de la Fase 1](docs/superpowers/plans/2026-07-27-agent-client-ui-fase-1.md) | Plan de implementación tarea por tarea, con código y pruebas |
-
----
+1. Usa un token distinto por equipo.
+2. Restringe el firewall a la IP o subred del administrador.
+3. No expongas el puerto del agente directamente a Internet.
+4. Usa una VLAN o red de administracion separada cuando sea posible.
+5. Protege el equipo administrador y sus archivos SQLite.
+6. Informa a los usuarios cuando sus equipos esten gestionados.
+7. Planifica mTLS como evolucion de la autenticacion compartida por token.
 
 ## Estructura del repositorio
 
-```
+```text
 lan-commander/
-├── agent/                    # Agente por equipo (Go)
-│   ├── cmd/lan-agent/        # Punto de entrada y gestión del servicio
-│   └── internal/             # server, executor, filesystem, screenshot,
-│                             # system, discovery, protocol, ui
-├── control-center/           # Panel de administración (Wails)
-│   ├── backend/              # audit, client, discovery, protocol,
-│   │                         # scripting, session, wol
-│   ├── frontend/src/         # Svelte 5 + Tailwind 4
-│   └── wails.json
+├── agent/
+│   ├── cmd/lan-agent/          Entrada del agente y gestion del servicio
+│   └── internal/
+│       ├── discovery/          Anuncio mDNS
+│       ├── executor/            Comandos del sistema
+│       ├── filesystem/          Directorios y archivos por bloques
+│       ├── protocol/            Mensajes compartidos
+│       ├── screenshot/          Captura de pantalla
+│       ├── server/              Servidor WebSocket
+│       ├── system/              Metricas
+│       └── ui/                  Interfaz visual local
+├── control-center/
+│   ├── app.go                   Bindings y operaciones del escritorio
+│   ├── backend/                 Cliente, auditoria, sesiones, scripts y WOL
+│   └── frontend/                Svelte, TypeScript, Vite y Tailwind
 ├── installers/
-│   ├── windows/              # install-agent.ps1
-│   └── linux/                # install-agent.sh
-├── scripts/                  # build-all.ps1, build-agent.ps1
-└── docs/superpowers/         # Especificaciones y planes
+│   ├── windows/                 PowerShell y payload Windows
+│   └── linux/                   Bash y payload Linux
+├── scripts/                     Compilacion reproducible
+└── docs/                        Especificaciones y planes
 ```
+
+## Pruebas y verificacion
+
+La verificacion realizada para esta version incluye:
+
+- `go test -p 1 ./... -race` en el agente.
+- `go vet ./...` en el agente.
+- `go test ./...` y `go vet ./...` en el Control Center.
+- `npm run check` sin errores ni avisos.
+- `npm run build` del frontend.
+- Build de produccion Wails del Control Center.
+- Compilacion cruzada del agente para Linux amd64.
+- Analisis sintactico de los scripts PowerShell.
+
+El chequeo `bash -n` debe ejecutarse en Linux o WSL; el entorno Windows usado para esta auditoria no tenia disponible el subsistema Bash.
+
+## Estado y proximas mejoras
+
+### Implementado
+
+- Control Center de escritorio.
+- Agente Windows y Linux como servicio.
+- Descubrimiento mDNS.
+- Autenticacion por token desde instaladores.
+- Ejecucion de comandos y scripts.
+- Metricas del sistema.
+- Explorador y transferencia de archivos por bloques con SHA-256.
+- Captura de pantalla en backend.
+- Wake-on-LAN.
+- Sesiones y auditoria SQLite.
+- Interfaz visual local del agente.
+
+### Proximas mejoras
+
+- Bandeja del sistema para la interfaz visual.
+- Notificaciones de actividad y solicitudes de ayuda.
+- Registro de actividad visible para el usuario final.
+- Botones pendientes en el Control Center para captura, descarga y desconexion.
+- TLS por defecto con validacion de certificados.
+- Cifrado de tokens en reposo.
+- Endurecimiento de `CheckOrigin`.
+- Mas pruebas de integracion y pruebas reales de instalacion en Windows y Linux.
+
+## Documentacion relacionada
+
+- [Especificacion de interfaz del agente](docs/superpowers/specs/2026-07-27-agent-client-ui-design.md)
+- [Plan original de la interfaz del agente](docs/superpowers/plans/2026-07-27-agent-client-ui-fase-1.md)

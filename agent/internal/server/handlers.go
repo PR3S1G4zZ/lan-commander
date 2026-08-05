@@ -1,7 +1,6 @@
 package server
 
 import (
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -144,6 +143,9 @@ func (c *Client) handleGetFile(msg protocol.Message) {
 	if chunkSize <= 0 {
 		chunkSize = filesystem.DefaultChunkSize
 	}
+	if chunkSize > filesystem.MaxChunkSize {
+		chunkSize = filesystem.MaxChunkSize
+	}
 
 	data, totalSize, err := filesystem.ReadFileChunk(getPayload.Path, getPayload.Offset, chunkSize)
 	if err != nil {
@@ -153,11 +155,14 @@ func (c *Client) handleGetFile(msg protocol.Message) {
 
 	final := getPayload.Offset+int64(len(data)) >= totalSize
 
-	// Compute SHA256 checksum for the final chunk
+	// Compute the checksum of the complete file on the final chunk.
 	checksum := ""
 	if final {
-		h := sha256.Sum256(data)
-		checksum = fmt.Sprintf("%x", h)
+		checksum, err = filesystem.FileSHA256(getPayload.Path)
+		if err != nil {
+			c.sendError(msg.ID, fmt.Sprintf("checksum error: %v", err))
+			return
+		}
 	}
 
 	c.sendResponse(msg.ID, protocol.MsgFileChunk, protocol.FileChunkPayload{
