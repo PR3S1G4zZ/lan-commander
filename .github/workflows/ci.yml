@@ -40,6 +40,21 @@ jobs:
           go-version-file: ${{ matrix.directory }}/go.mod
           cache: true
 
+      - name: Set up Node.js for embedded frontend
+        if: matrix.module == 'control-center'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: control-center/frontend/package-lock.json
+
+      - name: Build embedded frontend
+        if: matrix.module == 'control-center'
+        working-directory: control-center/frontend
+        run: |
+          npm ci
+          npm run build
+
       - name: Test
         run: go test ./... -count=1
 
