@@ -2,6 +2,7 @@
 	import { selectedAgent } from '../stores/agents';
 	import { addNotification } from '../stores/ui';
 	import { execCommand } from '../utils/api';
+	import { getErrorMessage } from '../utils/format';
 	import Icon from './Icon.svelte';
 
 	let command = $state('');
@@ -35,9 +36,9 @@
 			} else {
 				output.push(`[done: ${result.duration_ms}ms]`);
 			}
-		} catch (err: any) {
-			output.push(`[error: ${err.message || err}]`);
-			addNotification('error', `Command failed: ${err.message || err}`);
+		} catch (err) {
+			output.push(`[error: ${getErrorMessage(err)}]`);
+			addNotification('error', `Command failed: ${getErrorMessage(err)}`);
 		} finally {
 			running = false;
 			if (autoScroll) {
@@ -63,8 +64,12 @@
 
 	function clearOutput() { output = []; }
 	async function copyOutput() {
-		await navigator.clipboard.writeText(output.join('\n'));
-		addNotification('success', 'Output copied to clipboard');
+		try {
+			await navigator.clipboard.writeText(output.join('\n'));
+			addNotification('success', 'Output copied to clipboard');
+		} catch (err) {
+			addNotification('error', `Copy failed: ${getErrorMessage(err)}`);
+		}
 	}
 </script>
 
@@ -74,13 +79,13 @@
 			<Icon name="terminal" size={14} class="text-cyan-400" /> Terminal{$selectedAgent ? ' - ' + $selectedAgent.name : ''}
 		</span>
 		<div class="flex items-center gap-2">
-			<button class="p-1.5 rounded bg-gray-800 hover:bg-gray-700 text-slate-400 cursor-pointer border-none" onclick={copyOutput} title="Copy">
+			<button aria-label="Copy terminal output" class="p-1.5 rounded bg-gray-800 hover:bg-gray-700 text-slate-400 cursor-pointer border-none" onclick={copyOutput} title="Copy">
 				<Icon name="copy" size={13} />
 			</button>
-			<button class="p-1.5 rounded bg-gray-800 hover:bg-gray-700 text-slate-400 cursor-pointer border-none" onclick={clearOutput} title="Clear">
+			<button aria-label="Clear terminal output" class="p-1.5 rounded bg-gray-800 hover:bg-gray-700 text-slate-400 cursor-pointer border-none" onclick={clearOutput} title="Clear">
 				<Icon name="trash" size={13} />
 			</button>
-			<label class="flex items-center gap-1 text-xs text-slate-500"><input type="checkbox" bind:checked={autoScroll} /> Auto-scroll</label>
+			<label class="flex items-center gap-1 text-xs text-slate-500"><input type="checkbox" bind:checked={autoScroll} aria-label="Enable terminal auto-scroll" /> Auto-scroll</label>
 		</div>
 	</div>
 
@@ -102,6 +107,7 @@
 			bind:value={command}
 			onkeydown={handleKeydown}
 			disabled={running || !$selectedAgent}
+			aria-label="Terminal command"
 			placeholder={$selectedAgent ? 'Enter command...' : 'Select an agent first'}
 			class="flex-1 bg-transparent outline-none text-slate-200 font-mono text-sm disabled:opacity-50"
 		/>

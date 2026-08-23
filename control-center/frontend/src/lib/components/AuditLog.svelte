@@ -1,17 +1,26 @@
 <script lang="ts">
 	import { type AuditEntry } from '../stores/agents';
 	import { getAuditLogs } from '../utils/api';
+	import { addNotification } from '../stores/ui';
+	import { getErrorMessage } from '../utils/format';
 
 	let logs = $state<AuditEntry[]>([]);
 	let loading = $state(false);
 	let filterAction = $state('');
 	let searchText = $state('');
+	let loadError = $state<string | null>(null);
 
 	$effect(() => { refresh(); });
 
 	async function refresh() {
 		loading = true;
-		try { logs = (await getAuditLogs(200)) as AuditEntry[]; } catch {}
+		loadError = null;
+		try {
+			logs = (await getAuditLogs(200)) as AuditEntry[];
+		} catch (err) {
+			loadError = getErrorMessage(err);
+			addNotification('error', `Failed to load audit log: ${loadError}`);
+		}
 		finally { loading = false; }
 	}
 
@@ -26,9 +35,9 @@
 	<div class="p-4 border-b border-slate-700">
 		<h2 class="text-lg font-semibold text-slate-100 mb-2">Audit Log</h2>
 		<div class="flex gap-2">
-			<input type="text" bind:value={searchText} placeholder="Search..." class="bg-slate-700 text-slate-200 rounded px-3 py-1.5 text-sm outline-none border border-slate-600 focus:border-cyan-500" />
-			<input type="text" bind:value={filterAction} placeholder="Filter action..." class="bg-slate-700 text-slate-200 rounded px-3 py-1.5 text-sm outline-none border border-slate-600 focus:border-cyan-500" />
-			<button class="px-3 py-1.5 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 text-sm cursor-pointer border-none" onclick={refresh}>⟳</button>
+			<input type="text" bind:value={searchText} aria-label="Search audit log" placeholder="Search..." class="bg-slate-700 text-slate-200 rounded px-3 py-1.5 text-sm outline-none border border-slate-600 focus:border-cyan-500" />
+			<input type="text" bind:value={filterAction} aria-label="Filter audit actions" placeholder="Filter action..." class="bg-slate-700 text-slate-200 rounded px-3 py-1.5 text-sm outline-none border border-slate-600 focus:border-cyan-500" />
+			<button aria-label="Refresh audit log" class="px-3 py-1.5 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 text-sm cursor-pointer border-none" onclick={refresh}>⟳</button>
 		</div>
 	</div>
 
@@ -41,7 +50,12 @@
 			<span class="w-20 flex-shrink-0">Status</span>
 		</div>
 
-		{#if loading}
+		{#if loadError}
+			<div class="flex flex-col items-center justify-center gap-2 py-12 text-sm text-red-300" role="alert">
+				<span>Could not load audit log</span>
+				<span class="text-xs text-red-400/80">{loadError}</span>
+			</div>
+		{:else if loading}
 			<div class="flex items-center justify-center py-12 text-sm text-slate-500">Loading...</div>
 		{:else if filteredLogs.length === 0}
 			<div class="flex items-center justify-center py-12 text-sm text-slate-500">No entries found</div>

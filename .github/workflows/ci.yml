@@ -1,0 +1,160 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - "fix/**"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: Go / ${{ matrix.module }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - module: agent
+            directory: agent
+          - module: control-center
+            directory: control-center
+    defaults:
+      run:
+        working-directory: ${{ matrix.directory }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ matrix.directory }}/go.mod
+          cache: true
+
+      - name: Test
+        run: go test ./... -count=1
+
+      - name: Race test
+        run: go test -race ./...
+
+      - name: Vet
+        run: go vet ./...
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: control-center/frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: control-center/frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Type and Svelte checks
+        run: npm run check
+
+      - name: Production build
+        run: npm run build
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+  scripts:
+    name: Installer and script syntax
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Parse PowerShell scripts
+        shell: pwsh
+        run: |
+          $files = @(
+            'scripts/build-agent.ps1',
+            'scripts/build-all.ps1',
+            'scripts/generate-release-manifest.ps1',
+            'scripts/verify-release-manifest.ps1',
+            'installers/windows/install-agent.ps1'
+          )
+          foreach ($file in $files) {
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Join-Path $env:GITHUB_WORKSPACE $file),
+              [ref]$null,
+              [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -gt 0) {
+              $errors | ForEach-Object { Write-Error "${file}: $($_.Message)" }
+              throw "PowerShell syntax check failed: $file"
+            }
+          }
+
+      - name: Check Linux installer syntax
+        shell: pwsh
+        run: |
+          & 'C:\Program Files\Git\bin\bash.exe' -n installers/linux/install-agent.sh
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  release-build:
+    name: Release build and manifest
+    runs-on: windows-latest
+    needs: [go, frontend, scripts]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: agent/go.mod
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: control-center/frontend/package-lock.json
+
+      - name: Install Wails CLI
+        shell: pwsh
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.13.0
+
+      - name: Build all release artifacts
+        shell: pwsh
+        run: .\scripts\build-all.ps1
+
+      - name: Upload release artifacts with manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: lan-commander-release
+          if-no-files-found: error
+          path: |
+            release-manifest.sha256
+            agent/build/lan-agent.exe
+            agent/build/lan-agent-linux
+            installers/windows/lan-agent.exe
+            installers/linux/lan-agent-linux
+            control-center/build/bin/lan-commander.exe

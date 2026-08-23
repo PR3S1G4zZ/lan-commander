@@ -1,8 +1,50 @@
 <script lang="ts">
-	import { agents, selectedAgentId, type AgentInfo, type SystemInfo } from '../stores/agents';
-	import { currentView } from '../stores/ui';
-	import { formatBytes, formatPercent, formatUptime, getOsMeta } from '../utils/format';
+	import { onDestroy } from 'svelte';
+	import { agents, selectedAgentId, type AgentInfo, type ScreenshotData, type SystemInfo } from '../stores/agents';
+	import { addNotification, currentView } from '../stores/ui';
+	import { requestScreenshot } from '../utils/api';
+	import { formatBytes, formatPercent, formatUptime, getErrorMessage, getOsMeta } from '../utils/format';
 	import Icon from './Icon.svelte';
+
+	let screenshotLoadingAgentId = $state<string | null>(null);
+	let screenshotUrl = $state<string | null>(null);
+	let screenshotAgentName = $state('');
+	let screenshotError = $state<string | null>(null);
+
+	function releaseScreenshotUrl() {
+		if (screenshotUrl) URL.revokeObjectURL(screenshotUrl);
+		screenshotUrl = null;
+	}
+
+	onDestroy(releaseScreenshotUrl);
+
+	function decodeScreenshotData(data: ScreenshotData['data']): Uint8Array {
+		if (typeof data !== 'string') return Uint8Array.from(data);
+		const binary = atob(data);
+		return Uint8Array.from(binary, character => character.charCodeAt(0));
+	}
+
+	async function captureScreenshot(agent: AgentInfo) {
+		screenshotLoadingAgentId = agent.id;
+		screenshotError = null;
+		try {
+			const screenshot = (await requestScreenshot(agent.id)) as ScreenshotData;
+			const bytes = decodeScreenshotData(screenshot.data);
+			if (bytes.byteLength === 0) throw new Error('Agent returned an empty screenshot');
+			const format = (screenshot.format || 'png').toLowerCase();
+			const mimeType = format === 'jpeg' || format === 'jpg' ? 'image/jpeg' : 'image/png';
+			releaseScreenshotUrl();
+			const blobBytes = new ArrayBuffer(bytes.byteLength);
+			new Uint8Array(blobBytes).set(bytes);
+			screenshotUrl = URL.createObjectURL(new Blob([blobBytes], { type: mimeType }));
+			screenshotAgentName = agent.name;
+		} catch (err) {
+			screenshotError = getErrorMessage(err);
+			addNotification('error', `Screenshot failed: ${screenshotError}`);
+		} finally {
+			screenshotLoadingAgentId = null;
+		}
+	}
 
 	function getCpuColor(pct: number): string {
 		if (pct > 90) return 'from-red-500 to-red-600';
@@ -28,6 +70,11 @@
 </script>
 
 <div class="p-6 h-full overflow-y-auto box-border">
+	{#if screenshotError}
+		<div class="flex items-center gap-2 mb-4 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/30 text-sm text-red-300" role="alert">
+			<Icon name="alert-triangle" size={15} /> Screenshot error: {screenshotError}
+		</div>
+	{/if}
 	{#if $agents.filter(a => a.connected).length > 0}
 		<div class="grid gap-4" style="grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));">
 			{#each $agents.filter(a => a.connected) as agent (agent.id)}
@@ -87,13 +134,22 @@
 								<Icon name="chevron-up" size={11} /> {formatUptime(sys.uptime)}
 							</span>
 							<div class="flex gap-1">
-								<button class="p-1.5 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors cursor-pointer border-none" onclick={() => viewTerminal(agent.id)} title="Terminal">
+								<button aria-label={`Open terminal for ${agent.name}`} class="p-1.5 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors cursor-pointer border-none" onclick={() => viewTerminal(agent.id)} title="Terminal">
 									<Icon name="terminal" size={13} />
 								</button>
-								<button class="p-1.5 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors cursor-pointer border-none" onclick={() => viewFiles(agent.id)} title="Files">
+								<button aria-label={`Open files for ${agent.name}`} class="p-1.5 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors cursor-pointer border-none" onclick={() => viewFiles(agent.id)} title="Files">
 									<Icon name="folder" size={13} />
 								</button>
+								<button aria-label={`Capture screenshot from ${agent.name}`} class="p-1.5 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 disabled:opacity-50 cursor-pointer border-none" onclick={() => captureScreenshot(agent)} title="Capture screenshot" disabled={screenshotLoadingAgentId !== null}>
+									<Icon name="image" size={13} />
+								</button>
 							</div>
+						</div>
+					{:else if agent.systemInfoError}
+						<div class="flex flex-col items-center justify-center gap-2 py-8 text-sm text-red-300" role="alert">
+							<Icon name="alert-triangle" size={22} />
+							<span>System information unavailable</span>
+							<span class="text-xs text-red-400/80 text-center px-4">{agent.systemInfoError}</span>
 						</div>
 					{:else}
 						<div class="flex flex-col items-center justify-center py-8 text-sm text-slate-500">
@@ -115,3 +171,17 @@
 		</div>
 	{/if}
 </div>
+
+{#if screenshotUrl}
+	<div class="fixed inset-0 z-50 flex items-center justify-center p-6 bg-black/70" role="dialog" aria-modal="true" aria-labelledby="screenshot-title">
+		<div class="relative max-w-5xl max-h-full rounded-xl border border-slate-700 bg-slate-900 p-4 shadow-2xl">
+			<div class="flex items-center justify-between gap-4 mb-3">
+				<h2 id="screenshot-title" class="text-sm font-semibold text-slate-100">Screenshot — {screenshotAgentName}</h2>
+				<button type="button" aria-label="Close screenshot" class="p-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 cursor-pointer border-none" onclick={releaseScreenshotUrl}>
+					<Icon name="x" size={15} />
+				</button>
+			</div>
+			<img src={screenshotUrl} alt={`Screenshot from ${screenshotAgentName}`} class="max-w-full max-h-[75vh] object-contain" />
+		</div>
+	</div>
+{/if}

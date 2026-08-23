@@ -25,6 +25,12 @@ export function formatPercent(pct: number): string {
 	return `${pct.toFixed(1)}%`;
 }
 
+export function getErrorMessage(error: unknown): string {
+	if (error instanceof Error) return error.message;
+	if (typeof error === 'string') return error;
+	return String(error);
+}
+
 export function formatTime(isoStr: string): string {
 	if (!isoStr) return '-';
 	const d = new Date(isoStr);

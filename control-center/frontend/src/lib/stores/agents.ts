@@ -65,7 +65,7 @@ export interface DirContents {
 
 export interface ScreenshotData {
 	format: string;
-	data: number[];
+	data: number[] | string;
 	width: number;
 	height: number;
 }
@@ -80,6 +80,7 @@ export interface AgentInfo {
 	connected: boolean;
 	lastSeen: string;
 	systemInfo: SystemInfo | null;
+	systemInfoError: string | null;
 	cpuHistory: number[];
 }
 

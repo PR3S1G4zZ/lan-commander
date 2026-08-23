@@ -3,6 +3,7 @@ package audit
 import (
 	"database/sql"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -10,9 +11,10 @@ import (
 )
 
 const (
-	StatusSuccess = "success"
-	StatusError   = "error"
-	StatusWarning = "warning"
+	StatusSuccess   = "success"
+	StatusError     = "error"
+	StatusWarning   = "warning"
+	defaultCapacity = 1000
 )
 
 // Entry represents a single audit log entry.
@@ -39,14 +41,17 @@ type Logger struct {
 // NewLogger creates a new audit logger with a default capacity of 1000 entries.
 func NewLogger() *Logger {
 	return &Logger{
-		entries:  make([]Entry, 0, 1000),
-		capacity: 1000,
+		entries:  make([]Entry, 0, defaultCapacity),
+		capacity: defaultCapacity,
 		nextID:   1,
 	}
 }
 
 // NewLoggerWithCapacity creates a new audit logger with a specified capacity.
 func NewLoggerWithCapacity(capacity int) *Logger {
+	if capacity <= 0 {
+		capacity = defaultCapacity
+	}
 	return &Logger{
 		entries:  make([]Entry, 0, capacity),
 		capacity: capacity,
@@ -63,6 +68,14 @@ func (l *Logger) OpenDB(dbPath string) error {
 		dbPath = "audit.db"
 	}
 
+	if l.db != nil {
+		if err := l.db.Close(); err != nil {
+			return fmt.Errorf("failed to close existing audit database: %w", err)
+		}
+		l.db = nil
+		l.dbEnabled = false
+	}
+
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return fmt.Errorf("failed to open audit database: %w", err)
@@ -72,7 +85,6 @@ func (l *Logger) OpenDB(dbPath string) error {
 	db.SetMaxIdleConns(1)
 
 	l.db = db
-	l.dbEnabled = true
 
 	if err := l.createTable(); err != nil {
 		l.db.Close()
@@ -80,6 +92,18 @@ func (l *Logger) OpenDB(dbPath string) error {
 		l.dbEnabled = false
 		return fmt.Errorf("failed to create audit_log table: %w", err)
 	}
+
+	var nextID int64
+	if err := db.QueryRow("SELECT COALESCE(MAX(id), 0) + 1 FROM audit_log").Scan(&nextID); err != nil {
+		db.Close()
+		l.db = nil
+		return fmt.Errorf("failed to initialize audit log ID: %w", err)
+	}
+	if nextID < 1 {
+		nextID = 1
+	}
+	l.nextID = nextID
+	l.dbEnabled = true
 
 	return nil
 }
@@ -105,7 +129,10 @@ func (l *Logger) Close() error {
 	defer l.mu.Unlock()
 
 	if l.db != nil {
-		return l.db.Close()
+		err := l.db.Close()
+		l.db = nil
+		l.dbEnabled = false
+		return err
 	}
 	return nil
 }
@@ -116,8 +143,11 @@ func (l *Logger) Log(action, agentID, user, details, status string) {
 		status = StatusSuccess
 	}
 
+	l.mu.Lock()
+	fallbackID := l.nextID
+	l.nextID++
 	entry := Entry{
-		ID:        l.nextID,
+		ID:        fallbackID,
 		Timestamp: time.Now(),
 		Action:    action,
 		AgentID:   agentID,
@@ -126,29 +156,36 @@ func (l *Logger) Log(action, agentID, user, details, status string) {
 		Status:    status,
 	}
 
-	l.mu.Lock()
-	l.nextID++
+	var dbErr error
+	if l.dbEnabled && l.db != nil {
+		result, err := l.db.Exec(
+			"INSERT INTO audit_log (timestamp, action, agent_id, user, details, status) VALUES (?, ?, ?, ?, ?, ?)",
+			entry.Timestamp, entry.Action, entry.AgentID, entry.User, entry.Details, entry.Status,
+		)
+		if err != nil {
+			dbErr = err
+		} else if id, err := result.LastInsertId(); err != nil {
+			dbErr = fmt.Errorf("failed to get inserted audit ID: %w", err)
+		} else if id > 0 {
+			entry.ID = id
+			if l.nextID <= id {
+				l.nextID = id + 1
+			}
+		}
+	}
 
-	// Ring buffer: append, trim if over capacity
+	// Ring buffer: append, trim if over capacity.
 	if len(l.entries) >= l.capacity {
 		l.entries = append(l.entries[1:], entry)
 	} else {
 		l.entries = append(l.entries, entry)
 	}
-
-	// Also write to DB if enabled
-	var dbErr error
-	if l.dbEnabled && l.db != nil {
-		_, dbErr = l.db.Exec(
-			"INSERT INTO audit_log (timestamp, action, agent_id, user, details, status) VALUES (?, ?, ?, ?, ?, ?)",
-			entry.Timestamp, entry.Action, entry.AgentID, entry.User, entry.Details, entry.Status,
-		)
-	}
 	l.mu.Unlock()
 
 	if dbErr != nil {
-		// Silently log db error — audit should never break the main flow
-		fmt.Printf("audit: failed to write to database: %v\n", dbErr)
+		// Audit persistence must not break the main flow, but the failure must be
+		// visible to operators and tests.
+		log.Printf("audit: failed to write to database: %v", dbErr)
 	}
 }
 
@@ -163,6 +200,53 @@ func (l *Logger) GetRecent(limit int) []Entry {
 
 	l.mu.RLock()
 	defer l.mu.RUnlock()
+
+	if l.dbEnabled && l.db != nil {
+		entries, err := l.getRecentFromDBLocked(limit)
+		if err == nil {
+			return entries
+		}
+		log.Printf("audit: failed to read persisted entries: %v", err)
+	}
+
+	return l.getRecentFromMemoryLocked(limit)
+}
+
+func (l *Logger) getRecentFromDBLocked(limit int) ([]Entry, error) {
+	rows, err := l.db.Query(`
+		SELECT id, timestamp, action, agent_id, user, details, status
+		FROM audit_log
+		ORDER BY id DESC
+		LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	entries := make([]Entry, 0, limit)
+	for rows.Next() {
+		var entry Entry
+		if err := rows.Scan(&entry.ID, &entry.Timestamp, &entry.Action, &entry.AgentID, &entry.User, &entry.Details, &entry.Status); err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Keep the historical API order: oldest to newest within the selected
+	// recent window.
+	for left, right := 0, len(entries)-1; left < right; left, right = left+1, right-1 {
+		entries[left], entries[right] = entries[right], entries[left]
+	}
+	return entries, nil
+}
+
+func (l *Logger) getRecentFromMemoryLocked(limit int) []Entry {
+	if limit > l.capacity {
+		limit = l.capacity
+	}
 
 	total := len(l.entries)
 	if total == 0 {
@@ -179,9 +263,15 @@ func (l *Logger) GetRecent(limit int) []Entry {
 	return result
 }
 
-// Clear removes all entries from the in-memory buffer.
+// Clear removes all entries from the in-memory buffer and the optional
+// persistent store.
 func (l *Logger) Clear() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.dbEnabled && l.db != nil {
+		if _, err := l.db.Exec("DELETE FROM audit_log"); err != nil {
+			log.Printf("audit: failed to clear persisted entries: %v", err)
+		}
+	}
 	l.entries = make([]Entry, 0, l.capacity)
 }
