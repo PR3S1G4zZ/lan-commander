@@ -2,11 +2,14 @@ package client
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net/url"
+	"os"
 	"sync"
 	"time"
 
@@ -17,36 +20,86 @@ import (
 )
 
 const (
-	writeTimeout      = 10 * time.Second
-	readTimeout       = 60 * time.Second
-	handshakeTimeout  = 10 * time.Second
-	heartbeatInterval = 30 * time.Second
+	writeTimeout        = 10 * time.Second
+	readTimeout         = 60 * time.Second
+	handshakeTimeout    = 10 * time.Second
+	heartbeatInterval   = 30 * time.Second
 	maxReconnectRetries = 5
-	reconnectDelay    = 5 * time.Second
+	reconnectDelay      = 5 * time.Second
+	maxMessageSize      = 10 * 1024 * 1024
 )
 
 // AgentInfo holds the runtime state of a connected/known agent.
 type AgentInfo struct {
-	ID         string                     `json:"id"`
-	Host       string                     `json:"host"`
-	Port       int                        `json:"port"`
-	AuthToken  string                     `json:"auth_token,omitempty"`
-	Name       string                     `json:"name"`
-	OS         string                     `json:"os"`
-	Arch       string                     `json:"arch"`
-	Connected  bool                       `json:"connected"`
-	LastSeen   time.Time                  `json:"last_seen"`
+	ID         string                      `json:"id"`
+	Host       string                      `json:"host"`
+	Port       int                         `json:"port"`
+	AuthToken  string                      `json:"auth_token,omitempty"`
+	Name       string                      `json:"name"`
+	OS         string                      `json:"os"`
+	Arch       string                      `json:"arch"`
+	Connected  bool                        `json:"connected"`
+	LastSeen   time.Time                   `json:"last_seen"`
 	SystemInfo *protocol.SystemInfoPayload `json:"system_info,omitempty"`
 }
 
-// AgentConnection holds the WebSocket connection and associated state for an agent.
-type AgentConnection struct {
-	info      *AgentInfo
+// ConnectOptions controls one agent WebSocket connection and is retained for
+// every reconnect of that logical agent.
+type ConnectOptions struct {
+	AuthToken  string
+	TLS        bool
+	UseTLS     bool
+	CAFile     string
+	ServerName string
+}
+
+func (o ConnectOptions) tlsEnabled() bool {
+	return o.TLS || o.UseTLS
+}
+
+// connectionGeneration owns one WebSocket lifecycle. A new socket gets a new
+// generation, including a new done channel, so a reconnect can never close a
+// channel already closed by the previous read pump.
+type connectionGeneration struct {
 	conn      *websocket.Conn
 	writeMu   sync.Mutex
-	cancel    context.CancelFunc
-	cancelCtx context.Context
 	done      chan struct{}
+	doneOnce  sync.Once
+	closeOnce sync.Once
+}
+
+func newConnectionGeneration(conn *websocket.Conn) *connectionGeneration {
+	return &connectionGeneration{
+		conn: conn,
+		done: make(chan struct{}),
+	}
+}
+
+func (g *connectionGeneration) finish() {
+	if g == nil {
+		return
+	}
+	g.doneOnce.Do(func() { close(g.done) })
+}
+
+func (g *connectionGeneration) closeConn() {
+	if g == nil || g.conn == nil {
+		return
+	}
+	g.closeOnce.Do(func() { _ = g.conn.Close() })
+}
+
+// AgentConnection holds the stable agent identity and the current socket
+// generation. State is protected independently from Manager.mu so no manager
+// lock is held while doing network I/O.
+type AgentConnection struct {
+	info       *AgentInfo
+	options    ConnectOptions
+	stateMu    sync.RWMutex
+	generation *connectionGeneration
+	closed     bool
+	cancel     context.CancelFunc
+	cancelCtx  context.Context
 }
 
 // OnAgentMessage is a callback invoked when a message is received from an agent.
@@ -61,36 +114,187 @@ type pendingRequest struct {
 
 // Manager manages WebSocket connections to multiple agents.
 type Manager struct {
-	agents          map[string]*AgentConnection // agentId -> connection
-	mu              sync.RWMutex
-	onMessage       OnAgentMessage
-	globalCtx       context.Context
-	globalCancel    context.CancelFunc
-	pending         map[string]*pendingRequest // msgID -> pendingRequest
-	pendingMu       sync.RWMutex
+	agents         map[string]*AgentConnection // agentId -> connection
+	mu             sync.RWMutex
+	onMessage      OnAgentMessage
+	globalCtx      context.Context
+	globalCancel   context.CancelFunc
+	pending        map[string]*pendingRequest // msgID -> pendingRequest
+	pendingMu      sync.RWMutex
+	reconnectDelay time.Duration
 }
 
 // NewManager creates a new agent connection manager.
 func NewManager(onMessage OnAgentMessage) *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Manager{
-		agents:       make(map[string]*AgentConnection),
-		onMessage:    onMessage,
-		globalCtx:    ctx,
-		globalCancel: cancel,
-		pending:      make(map[string]*pendingRequest),
+		agents:         make(map[string]*AgentConnection),
+		onMessage:      onMessage,
+		globalCtx:      ctx,
+		globalCancel:   cancel,
+		pending:        make(map[string]*pendingRequest),
+		reconnectDelay: reconnectDelay,
 	}
 }
 
-// Connect establishes a WebSocket connection to an agent at host:port.
-// If authToken is non-empty, it performs an authentication handshake.
+func cloneSystemInfo(info *protocol.SystemInfoPayload) *protocol.SystemInfoPayload {
+	if info == nil {
+		return nil
+	}
+	clone := *info
+	if info.Disks != nil {
+		clone.Disks = append([]protocol.DiskInfo(nil), info.Disks...)
+	}
+	return &clone
+}
+
+func cloneAgentInfo(info *AgentInfo) AgentInfo {
+	if info == nil {
+		return AgentInfo{}
+	}
+	clone := *info
+	clone.SystemInfo = cloneSystemInfo(info.SystemInfo)
+	return clone
+}
+
+func (ac *AgentConnection) snapshot() AgentInfo {
+	ac.stateMu.RLock()
+	defer ac.stateMu.RUnlock()
+	return cloneAgentInfo(ac.info)
+}
+
+func (ac *AgentConnection) currentGeneration() (*connectionGeneration, bool) {
+	ac.stateMu.RLock()
+	defer ac.stateMu.RUnlock()
+	if ac.generation == nil || ac.closed || ac.info == nil || !ac.info.Connected {
+		return nil, false
+	}
+	return ac.generation, true
+}
+
+func (ac *AgentConnection) id() string {
+	ac.stateMu.RLock()
+	defer ac.stateMu.RUnlock()
+	if ac.info == nil {
+		return ""
+	}
+	return ac.info.ID
+}
+
+func (ac *AgentConnection) connectionDetails() (id, host string, port int, options ConnectOptions) {
+	ac.stateMu.RLock()
+	defer ac.stateMu.RUnlock()
+	if ac.info == nil {
+		return "", "", 0, ConnectOptions{}
+	}
+	return ac.info.ID, ac.info.Host, ac.info.Port, ac.options
+}
+
+func (ac *AgentConnection) installGeneration(generation *connectionGeneration) (*connectionGeneration, bool) {
+	ac.stateMu.Lock()
+	defer ac.stateMu.Unlock()
+
+	if ac.closed || (ac.cancelCtx != nil && ac.cancelCtx.Err() != nil) || ac.info == nil {
+		return nil, false
+	}
+
+	old := ac.generation
+	ac.generation = generation
+	ac.info.Connected = true
+	ac.info.LastSeen = time.Now()
+	return old, true
+}
+
+func (ac *AgentConnection) markDisconnected(generation *connectionGeneration) {
+	ac.stateMu.Lock()
+	defer ac.stateMu.Unlock()
+	if ac.generation == generation && ac.info != nil {
+		ac.info.Connected = false
+	}
+}
+
+func (ac *AgentConnection) updateLastSeen(generation *connectionGeneration) {
+	ac.stateMu.Lock()
+	defer ac.stateMu.Unlock()
+	if ac.generation == generation && ac.info != nil {
+		ac.info.LastSeen = time.Now()
+	}
+}
+
+func (ac *AgentConnection) updateAgentInfo(generation *connectionGeneration, info protocol.AgentInfoPayload) {
+	ac.stateMu.Lock()
+	defer ac.stateMu.Unlock()
+	if ac.generation != generation || ac.info == nil || ac.closed {
+		return
+	}
+	if info.Hostname != "" {
+		ac.info.Name = info.Hostname
+	}
+	if info.OS != "" {
+		ac.info.OS = info.OS
+	}
+	if info.Arch != "" {
+		ac.info.Arch = info.Arch
+	}
+}
+
+func (ac *AgentConnection) updateSystemInfo(generation *connectionGeneration, sysInfo protocol.SystemInfoPayload) {
+	ac.stateMu.Lock()
+	defer ac.stateMu.Unlock()
+	if ac.generation != generation || ac.info == nil || ac.closed {
+		return
+	}
+	ac.info.SystemInfo = cloneSystemInfo(&sysInfo)
+	if sysInfo.Hostname != "" {
+		ac.info.Name = sysInfo.Hostname
+	}
+	if sysInfo.OS != "" {
+		ac.info.OS = sysInfo.OS
+	}
+	if sysInfo.Arch != "" {
+		ac.info.Arch = sysInfo.Arch
+	}
+}
+
+func (ac *AgentConnection) shouldReconnect(generation *connectionGeneration) bool {
+	ac.stateMu.RLock()
+	defer ac.stateMu.RUnlock()
+	return ac.generation == generation && !ac.closed && ac.info != nil &&
+		(ac.cancelCtx == nil || ac.cancelCtx.Err() == nil)
+}
+
+func (ac *AgentConnection) stop() *connectionGeneration {
+	ac.stateMu.Lock()
+	ac.closed = true
+	if ac.info != nil {
+		ac.info.Connected = false
+	}
+	generation := ac.generation
+	ac.stateMu.Unlock()
+
+	if ac.cancel != nil {
+		ac.cancel()
+	}
+	return generation
+}
+
+// Connect establishes a plain WebSocket connection to an agent at host:port.
+// It remains as the compatibility wrapper for existing callers.
 func (m *Manager) Connect(host string, port int, authToken string) (string, error) {
+	return m.ConnectWithOptions(host, port, ConnectOptions{AuthToken: authToken})
+}
+
+// ConnectWithOptions establishes a WebSocket connection using the supplied
+// transport and authentication options. TLS uses system roots plus CAFile and
+// always performs normal hostname verification.
+func (m *Manager) ConnectWithOptions(host string, port int, options ConnectOptions) (string, error) {
 	// Check if already connected to this host:port
 	m.mu.RLock()
 	for _, ac := range m.agents {
-		if ac.info.Host == host && ac.info.Port == port && ac.info.Connected {
+		info := ac.snapshot()
+		if info.Host == host && info.Port == port && info.Connected {
 			m.mu.RUnlock()
-			return ac.info.ID, nil
+			return info.ID, nil
 		}
 	}
 	m.mu.RUnlock()
@@ -99,19 +303,15 @@ func (m *Manager) Connect(host string, port int, authToken string) (string, erro
 	agentID := uuid.New().String()
 
 	// Build WebSocket URL
-	u := url.URL{
-		Scheme: "ws",
-		Host:   fmt.Sprintf("%s:%d", host, port),
-		Path:   "/ws",
+	u := websocketURL(host, port, options)
+	dialer, err := dialerForHost(host, options)
+	if err != nil {
+		return "", fmt.Errorf("failed to configure connection to agent at %s:%d: %w", host, port, err)
 	}
 
 	// Dial with timeout
 	ctx, cancel := context.WithTimeout(m.globalCtx, handshakeTimeout)
 	defer cancel()
-
-	dialer := websocket.Dialer{
-		HandshakeTimeout: handshakeTimeout,
-	}
 
 	conn, _, err := dialer.DialContext(ctx, u.String(), nil)
 	if err != nil {
@@ -122,7 +322,7 @@ func (m *Manager) Connect(host string, port int, authToken string) (string, erro
 	// gorilla/websocket forbids concurrent readers, and the agent sends
 	// auth_required as soon as the socket opens. Doing this afterwards raced
 	// the pump for the agent's reply and failed nondeterministically.
-	if err := handshake(conn, authToken); err != nil {
+	if err := handshake(conn, options.AuthToken); err != nil {
 		conn.Close()
 		return "", fmt.Errorf("agent at %s:%d: %w", host, port, err)
 	}
@@ -131,32 +331,97 @@ func (m *Manager) Connect(host string, port int, authToken string) (string, erro
 		ID:        agentID,
 		Host:      host,
 		Port:      port,
-		AuthToken: authToken,
+		AuthToken: options.AuthToken,
 		Connected: true,
 		LastSeen:  time.Now(),
 	}
 
 	agentCtx, agentCancel := context.WithCancel(m.globalCtx)
 	ac := &AgentConnection{
-		info:      info,
-		conn:      conn,
-		cancel:    agentCancel,
-		cancelCtx: agentCtx,
-		done:      make(chan struct{}),
+		info:       info,
+		options:    options,
+		generation: newConnectionGeneration(conn),
+		cancel:     agentCancel,
+		cancelCtx:  agentCtx,
 	}
 
 	m.mu.Lock()
+	// A concurrent Connect may have installed the same endpoint while this
+	// dial/handshake was in progress. Keep one logical agent per endpoint.
+	for _, existing := range m.agents {
+		existingInfo := existing.snapshot()
+		if existingInfo.Host == host && existingInfo.Port == port && existingInfo.Connected {
+			m.mu.Unlock()
+			conn.Close()
+			return existingInfo.ID, nil
+		}
+	}
+	if m.globalCtx.Err() != nil {
+		m.mu.Unlock()
+		conn.Close()
+		return "", fmt.Errorf("manager is shutting down")
+	}
 	m.agents[agentID] = ac
 	m.mu.Unlock()
 
 	// Start read pump
-	go m.readPump(ac)
+	go m.readPump(ac, ac.generation)
 
 	// Start heartbeat
-	go m.heartbeat(ac)
+	go m.heartbeat(ac, ac.generation)
 
 	log.Printf("client: connected to agent %s at %s:%d", agentID, host, port)
 	return agentID, nil
+}
+
+func websocketURL(host string, port int, options ConnectOptions) url.URL {
+	scheme := "ws"
+	if options.tlsEnabled() {
+		scheme = "wss"
+	}
+	return url.URL{
+		Scheme: scheme,
+		Host:   fmt.Sprintf("%s:%d", host, port),
+		Path:   "/ws",
+	}
+}
+
+func dialerForHost(host string, options ConnectOptions) (websocket.Dialer, error) {
+	dialer := websocket.Dialer{HandshakeTimeout: handshakeTimeout}
+	if !options.tlsEnabled() {
+		if options.CAFile != "" || options.ServerName != "" {
+			return dialer, fmt.Errorf("CAFile and ServerName require TLS")
+		}
+		return dialer, nil
+	}
+
+	rootCAs, err := x509.SystemCertPool()
+	if err != nil {
+		return dialer, fmt.Errorf("load system certificate pool: %w", err)
+	}
+	if rootCAs == nil {
+		rootCAs = x509.NewCertPool()
+	}
+	if options.CAFile != "" {
+		caPEM, err := os.ReadFile(options.CAFile)
+		if err != nil {
+			return dialer, fmt.Errorf("read CA file %q: %w", options.CAFile, err)
+		}
+		if !rootCAs.AppendCertsFromPEM(caPEM) {
+			return dialer, fmt.Errorf("CA file %q contains no certificates", options.CAFile)
+		}
+	}
+
+	serverName := options.ServerName
+	if serverName == "" {
+		serverName = host
+	}
+	dialer.TLSClientConfig = &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		RootCAs:    rootCAs,
+		ServerName: serverName,
+	}
+	return dialer, nil
 }
 
 // ErrAuthRequired reports that the agent demands a token the caller did not
@@ -167,6 +432,9 @@ var ErrAuthRequired = errors.New("agent requires an authentication token")
 // connection, before any concurrent reader exists. An agent configured with a
 // token greets with auth_required; one without sends agent_info directly.
 func handshake(conn *websocket.Conn, authToken string) error {
+	// Apply the limit before reading the greeting as well as for all subsequent
+	// frames. This prevents an oversized first frame from bypassing the limit.
+	conn.SetReadLimit(maxMessageSize)
 	if err := conn.SetReadDeadline(time.Now().Add(handshakeTimeout)); err != nil {
 		return fmt.Errorf("cannot set handshake deadline: %w", err)
 	}
@@ -237,20 +505,11 @@ func (m *Manager) Disconnect(agentID string) error {
 	delete(m.agents, agentID)
 	m.mu.Unlock()
 
-	ac.cancel()
-
-	// Graceful WebSocket close
-	err := ac.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "bye"))
-	if err != nil {
-		// Ignore write errors on close
-	}
-	ac.conn.Close()
+	generation := ac.stop()
+	m.closeGeneration(generation, "bye")
 
 	// Wait for read pump to finish (with timeout)
-	select {
-	case <-ac.done:
-	case <-time.After(2 * time.Second):
-	}
+	waitForGeneration(generation, 2*time.Second)
 
 	log.Printf("client: disconnected from agent %s", agentID)
 	return nil
@@ -265,11 +524,12 @@ func (m *Manager) SendMessage(agentID string, msg *protocol.Message) error {
 	if !exists {
 		return fmt.Errorf("agent %s not found", agentID)
 	}
-	if !ac.info.Connected {
+	generation, connected := ac.currentGeneration()
+	if !connected {
 		return fmt.Errorf("agent %s is not connected", agentID)
 	}
 
-	return m.writeJSON(ac, msg)
+	return m.writeJSON(generation, msg)
 }
 
 // SendRequest sends a request message and waits for a response.
@@ -350,7 +610,8 @@ func (m *Manager) GetAgent(agentID string) *AgentInfo {
 	if !exists {
 		return nil
 	}
-	return ac.info
+	info := ac.snapshot()
+	return &info
 }
 
 // ListAgents returns all known agents.
@@ -360,7 +621,7 @@ func (m *Manager) ListAgents() []AgentInfo {
 
 	result := make([]AgentInfo, 0, len(m.agents))
 	for _, ac := range m.agents {
-		result = append(result, *ac.info)
+		result = append(result, ac.snapshot())
 	}
 	return result
 }
@@ -372,7 +633,7 @@ func (m *Manager) ConnectedCount() int {
 
 	count := 0
 	for _, ac := range m.agents {
-		if ac.info.Connected {
+		if ac.snapshot().Connected {
 			count++
 		}
 	}
@@ -382,14 +643,15 @@ func (m *Manager) ConnectedCount() int {
 // CloseAll disconnects all agents gracefully.
 func (m *Manager) CloseAll() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
+	connections := make([]*AgentConnection, 0, len(m.agents))
 	for id, ac := range m.agents {
 		delete(m.agents, id)
-		ac.cancel()
-		ac.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "shutdown"))
-		ac.conn.Close()
+		connections = append(connections, ac)
 	}
+	m.mu.Unlock()
+
+	// Cancel first so reconnect attempts and pending requests stop promptly.
+	m.globalCancel()
 
 	// Clean up all pending requests
 	m.pendingMu.Lock()
@@ -399,25 +661,65 @@ func (m *Manager) CloseAll() {
 	}
 	m.pendingMu.Unlock()
 
-	m.globalCancel()
+	for _, ac := range connections {
+		generation := ac.stop()
+		m.closeGeneration(generation, "shutdown")
+		waitForGeneration(generation, 2*time.Second)
+	}
 }
 
 // --- internal methods ---
 
-func (m *Manager) writeJSON(ac *AgentConnection, msg interface{}) error {
-	ac.writeMu.Lock()
-	defer ac.writeMu.Unlock()
+func (m *Manager) writeJSON(generation *connectionGeneration, msg interface{}) error {
+	if generation == nil || generation.conn == nil {
+		return fmt.Errorf("connection is not available")
+	}
 
-	ac.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
-	return ac.conn.WriteJSON(msg)
+	generation.writeMu.Lock()
+	defer generation.writeMu.Unlock()
+
+	if err := generation.conn.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
+		return err
+	}
+	return generation.conn.WriteJSON(msg)
 }
 
-func (m *Manager) readPump(ac *AgentConnection) {
-	defer close(ac.done)
+func (m *Manager) closeGeneration(generation *connectionGeneration, reason string) {
+	if generation == nil || generation.conn == nil {
+		return
+	}
+
+	generation.writeMu.Lock()
+	_ = generation.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+	_ = generation.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, reason))
+	generation.writeMu.Unlock()
+	generation.closeConn()
+}
+
+func waitForGeneration(generation *connectionGeneration, timeout time.Duration) {
+	if generation == nil {
+		return
+	}
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-generation.done:
+	case <-timer.C:
+	}
+}
+
+func (m *Manager) readPump(ac *AgentConnection, generation *connectionGeneration) {
 	defer func() {
-		ac.info.Connected = false
-		ac.conn.Close()
+		ac.markDisconnected(generation)
+		generation.closeConn()
+		generation.finish()
 	}()
+
+	if generation == nil || generation.conn == nil {
+		return
+	}
+	generation.conn.SetReadLimit(maxMessageSize)
 
 	for {
 		select {
@@ -428,31 +730,33 @@ func (m *Manager) readPump(ac *AgentConnection) {
 		default:
 		}
 
-		ac.conn.SetReadDeadline(time.Now().Add(readTimeout))
-		_, messageBytes, err := ac.conn.ReadMessage()
+		generation.conn.SetReadDeadline(time.Now().Add(readTimeout))
+		_, messageBytes, err := generation.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-				log.Printf("client: read error from agent %s: %v", ac.info.ID, err)
+				log.Printf("client: read error from agent %s: %v", ac.id(), err)
 			}
 			// Attempt reconnection
-			go m.reconnect(ac)
+			if ac.shouldReconnect(generation) {
+				go m.reconnect(ac, generation)
+			}
 			return
 		}
 
-		ac.info.LastSeen = time.Now()
+		ac.updateLastSeen(generation)
 
 		var msg protocol.Message
 		if err := json.Unmarshal(messageBytes, &msg); err != nil {
-			log.Printf("client: failed to parse message from agent %s: %v", ac.info.ID, err)
+			log.Printf("client: failed to parse message from agent %s: %v", ac.id(), err)
 			continue
 		}
 
 		// Handle special message types internally
 		switch msg.Type {
 		case protocol.MsgAgentInfo:
-			m.handleAgentInfo(ac, messageBytes)
+			m.handleAgentInfo(ac, generation, messageBytes)
 		case protocol.MsgSystemUpdate:
-			m.handleSystemUpdate(ac, messageBytes)
+			m.handleSystemUpdate(ac, generation, messageBytes)
 		}
 
 		// Check if this message matches a pending request (by message ID)
@@ -473,12 +777,12 @@ func (m *Manager) readPump(ac *AgentConnection) {
 
 		// Forward to callback
 		if m.onMessage != nil {
-			m.onMessage(ac.info.ID, &msg)
+			m.onMessage(ac.id(), &msg)
 		}
 	}
 }
 
-func (m *Manager) handleAgentInfo(ac *AgentConnection, data []byte) {
+func (m *Manager) handleAgentInfo(ac *AgentConnection, generation *connectionGeneration, data []byte) {
 	var msg protocol.Message
 	if err := json.Unmarshal(data, &msg); err != nil {
 		return
@@ -494,18 +798,10 @@ func (m *Manager) handleAgentInfo(ac *AgentConnection, data []byte) {
 		return
 	}
 
-	if info.Hostname != "" {
-		ac.info.Name = info.Hostname
-	}
-	if info.OS != "" {
-		ac.info.OS = info.OS
-	}
-	if info.Arch != "" {
-		ac.info.Arch = info.Arch
-	}
+	ac.updateAgentInfo(generation, info)
 }
 
-func (m *Manager) handleSystemUpdate(ac *AgentConnection, data []byte) {
+func (m *Manager) handleSystemUpdate(ac *AgentConnection, generation *connectionGeneration, data []byte) {
 	var msg protocol.Message
 	if err := json.Unmarshal(data, &msg); err != nil {
 		return
@@ -521,19 +817,10 @@ func (m *Manager) handleSystemUpdate(ac *AgentConnection, data []byte) {
 		return
 	}
 
-	ac.info.SystemInfo = &sysInfo
-	if sysInfo.Hostname != "" {
-		ac.info.Name = sysInfo.Hostname
-	}
-	if sysInfo.OS != "" {
-		ac.info.OS = sysInfo.OS
-	}
-	if sysInfo.Arch != "" {
-		ac.info.Arch = sysInfo.Arch
-	}
+	ac.updateSystemInfo(generation, sysInfo)
 }
 
-func (m *Manager) heartbeat(ac *AgentConnection) {
+func (m *Manager) heartbeat(ac *AgentConnection, generation *connectionGeneration) {
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
 
@@ -544,10 +831,12 @@ func (m *Manager) heartbeat(ac *AgentConnection) {
 				Type:      protocol.MsgKeepAlive,
 				Timestamp: time.Now(),
 			}
-			if err := m.writeJSON(ac, msg); err != nil {
-				log.Printf("client: heartbeat failed for agent %s: %v", ac.info.ID, err)
+			if err := m.writeJSON(generation, msg); err != nil {
+				log.Printf("client: heartbeat failed for agent %s: %v", ac.id(), err)
 				return
 			}
+		case <-generation.done:
+			return
 		case <-ac.cancelCtx.Done():
 			return
 		case <-m.globalCtx.Done():
@@ -556,39 +845,48 @@ func (m *Manager) heartbeat(ac *AgentConnection) {
 	}
 }
 
-func (m *Manager) reconnect(ac *AgentConnection) {
-	// Don't reconnect if we were deliberately disconnected
-	select {
-	case <-ac.cancelCtx.Done():
+func (m *Manager) reconnect(ac *AgentConnection, failedGeneration *connectionGeneration) {
+	// Don't reconnect if the agent was deliberately disconnected or another
+	// generation has already taken over.
+	if !ac.shouldReconnect(failedGeneration) {
 		return
-	default:
+	}
+
+	agentID, host, port, options := ac.connectionDetails()
+	cancelCtx := ac.cancelCtx
+	if cancelCtx == nil {
+		cancelCtx = m.globalCtx
 	}
 
 	for i := 0; i < maxReconnectRetries; i++ {
-		time.Sleep(reconnectDelay)
-
+		timer := time.NewTimer(m.reconnectDelay)
 		select {
-		case <-ac.cancelCtx.Done():
+		case <-timer.C:
+		case <-cancelCtx.Done():
+			timer.Stop()
 			return
 		case <-m.globalCtx.Done():
+			timer.Stop()
 			return
-		default:
+		}
+
+		if !ac.shouldReconnect(failedGeneration) {
+			return
 		}
 
 		log.Printf("client: reconnecting to agent %s at %s:%d (attempt %d/%d)",
-			ac.info.ID, ac.info.Host, ac.info.Port, i+1, maxReconnectRetries)
+			agentID, host, port, i+1, maxReconnectRetries)
 
-		u := url.URL{
-			Scheme: "ws",
-			Host:   fmt.Sprintf("%s:%d", ac.info.Host, ac.info.Port),
-			Path:   "/ws",
+		u := websocketURL(host, port, options)
+		dialer, err := dialerForHost(host, options)
+		if err != nil {
+			log.Printf("client: reconnect options for agent %s are invalid: %v", agentID, err)
+			return
 		}
 
-		dialer := websocket.Dialer{
-			HandshakeTimeout: handshakeTimeout,
-		}
-
-		conn, _, err := dialer.DialContext(m.globalCtx, u.String(), nil)
+		ctx, cancel := context.WithTimeout(cancelCtx, handshakeTimeout)
+		conn, _, err := dialer.DialContext(ctx, u.String(), nil)
+		cancel()
 		if err != nil {
 			log.Printf("client: reconnect attempt %d failed: %v", i+1, err)
 			continue
@@ -596,27 +894,30 @@ func (m *Manager) reconnect(ac *AgentConnection) {
 
 		// Re-authenticate before installing the connection, for the same
 		// reason as in Connect: no concurrent reader may exist yet.
-		if err := handshake(conn, ac.info.AuthToken); err != nil {
-			log.Printf("client: re-authentication failed for agent %s: %v", ac.info.ID, err)
+		if err := handshake(conn, options.AuthToken); err != nil {
+			log.Printf("client: re-authentication failed for agent %s: %v", agentID, err)
 			conn.Close()
 			continue
 		}
 
-		// Replace old connection
-		oldConn := ac.conn
-		ac.conn = conn
-		ac.info.Connected = true
-		ac.info.LastSeen = time.Now()
-		oldConn.Close()
+		generation := newConnectionGeneration(conn)
+		oldGeneration, installed := ac.installGeneration(generation)
+		if !installed {
+			generation.closeConn()
+			return
+		}
+		if oldGeneration != nil {
+			oldGeneration.closeConn()
+		}
 
-		log.Printf("client: reconnected to agent %s", ac.info.ID)
+		log.Printf("client: reconnected to agent %s", agentID)
 
-		// Restart read pump and heartbeat
-		go m.readPump(ac)
-		go m.heartbeat(ac)
+		// Restart read pump and heartbeat for this generation only.
+		go m.readPump(ac, generation)
+		go m.heartbeat(ac, generation)
 		return
 	}
 
-	log.Printf("client: giving up reconnection to agent %s after %d attempts", ac.info.ID, maxReconnectRetries)
-	ac.info.Connected = false
+	log.Printf("client: giving up reconnection to agent %s after %d attempts", agentID, maxReconnectRetries)
+	ac.markDisconnected(failedGeneration)
 }

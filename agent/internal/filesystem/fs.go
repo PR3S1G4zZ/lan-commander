@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/mediacode/lan-commander/agent/internal/protocol"
@@ -192,6 +193,157 @@ func WriteFileChunk(path string, data []byte, offset int64) error {
 		return fmt.Errorf("short write: wrote %d of %d bytes", n, len(data))
 	}
 
+	return nil
+}
+
+// WriteAtomicUploadChunk appends one validated upload chunk to a temporary file
+// in the destination directory. The final path is replaced only after the
+// final chunk has the expected size and SHA-256 checksum.
+func WriteAtomicUploadChunk(path, transferID string, data []byte, offset, totalSize int64, final bool, expectedChecksum string) error {
+	if strings.TrimSpace(transferID) == "" {
+		return fmt.Errorf("transfer ID cannot be empty")
+	}
+	if strings.ContainsAny(transferID, `/\\`) || strings.Contains(transferID, "..") {
+		return fmt.Errorf("invalid transfer ID")
+	}
+
+	safe, err := safePath(path)
+	if err != nil {
+		return err
+	}
+	tempPath := filepath.Join(filepath.Dir(safe), ".lan-commander-upload-"+transferID+".part")
+	metaPath := tempPath + ".meta"
+	cleanup := func() {
+		_ = os.Remove(tempPath)
+		_ = os.Remove(metaPath)
+	}
+	if offset < 0 || totalSize < 0 {
+		cleanup()
+		return fmt.Errorf("invalid upload offset or total size")
+	}
+	if len(data) > DefaultChunkSize {
+		cleanup()
+		return fmt.Errorf("upload chunk exceeds %d bytes", DefaultChunkSize)
+	}
+	if offset+int64(len(data)) > totalSize {
+		cleanup()
+		return fmt.Errorf("upload chunk exceeds advertised total size")
+	}
+	if !final && len(data) == 0 {
+		cleanup()
+		return fmt.Errorf("empty non-final upload chunk")
+	}
+	if final && offset+int64(len(data)) != totalSize {
+		cleanup()
+		return fmt.Errorf("final upload chunk does not reach advertised total size")
+	}
+	if !final && offset+int64(len(data)) >= totalSize {
+		cleanup()
+		return fmt.Errorf("non-final upload chunk reaches advertised total size")
+	}
+
+	if offset == 0 {
+		if err := os.WriteFile(tempPath, nil, 0600); err != nil {
+			cleanup()
+			return fmt.Errorf("cannot create temporary upload: %w", err)
+		}
+		if err := os.WriteFile(metaPath, []byte(strconv.FormatInt(totalSize, 10)), 0600); err != nil {
+			cleanup()
+			return fmt.Errorf("cannot create upload metadata: %w", err)
+		}
+	} else {
+		metadata, err := os.ReadFile(metaPath)
+		if err != nil {
+			cleanup()
+			return fmt.Errorf("cannot read upload metadata: %w", err)
+		}
+		expectedTotal, err := strconv.ParseInt(strings.TrimSpace(string(metadata)), 10, 64)
+		if err != nil || expectedTotal != totalSize {
+			cleanup()
+			return fmt.Errorf("upload total size changed from %d to %d", expectedTotal, totalSize)
+		}
+		info, err := os.Stat(tempPath)
+		if err != nil {
+			cleanup()
+			return fmt.Errorf("cannot resume temporary upload: %w", err)
+		}
+		if info.Size() != offset {
+			cleanup()
+			return fmt.Errorf("upload offset %d does not match temporary size %d", offset, info.Size())
+		}
+	}
+
+	file, err := os.OpenFile(tempPath, os.O_WRONLY, 0600)
+	if err != nil {
+		cleanup()
+		return fmt.Errorf("cannot open temporary upload: %w", err)
+	}
+	if len(data) > 0 {
+		n, writeErr := file.WriteAt(data, offset)
+		if writeErr != nil {
+			_ = file.Close()
+			cleanup()
+			return fmt.Errorf("cannot write upload chunk: %w", writeErr)
+		}
+		if n != len(data) {
+			_ = file.Close()
+			cleanup()
+			return fmt.Errorf("short upload write: wrote %d of %d bytes", n, len(data))
+		}
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		cleanup()
+		return fmt.Errorf("cannot flush upload chunk: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		cleanup()
+		return fmt.Errorf("cannot close temporary upload: %w", err)
+	}
+	if !final {
+		return nil
+	}
+	if strings.TrimSpace(expectedChecksum) == "" {
+		cleanup()
+		return fmt.Errorf("final upload chunk is missing its checksum")
+	}
+	actualChecksum, err := FileSHA256(tempPath)
+	if err != nil {
+		cleanup()
+		return fmt.Errorf("cannot checksum temporary upload: %w", err)
+	}
+	if !strings.EqualFold(actualChecksum, expectedChecksum) {
+		cleanup()
+		return fmt.Errorf("upload checksum mismatch")
+	}
+	if err := os.Rename(tempPath, safe); err != nil {
+		cleanup()
+		return fmt.Errorf("cannot atomically finalize upload: %w", err)
+	}
+	_ = os.Remove(metaPath)
+	return nil
+}
+
+// CancelAtomicUpload removes an in-progress upload and leaves the final path
+// untouched. It is safe to call after a transfer has already committed.
+func CancelAtomicUpload(path, transferID string) error {
+	if strings.TrimSpace(transferID) == "" {
+		return fmt.Errorf("transfer ID cannot be empty")
+	}
+	if strings.ContainsAny(transferID, `/\\`) || strings.Contains(transferID, "..") {
+		return fmt.Errorf("invalid transfer ID")
+	}
+	safe, err := safePath(path)
+	if err != nil {
+		return err
+	}
+	tempPath := filepath.Join(filepath.Dir(safe), ".lan-commander-upload-"+transferID+".part")
+	metaPath := tempPath + ".meta"
+	for _, candidate := range []string{tempPath, metaPath} {
+		if err := os.Remove(candidate); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("cannot remove temporary upload %q: %w", candidate, err)
+		}
+	}
 	return nil
 }
 

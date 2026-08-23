@@ -62,6 +62,9 @@ Write-Host "Instalando LAN Commander Agent..." -ForegroundColor Cyan
 # Sin token, cualquier equipo de la LAN puede ejecutar comandos como SYSTEM en
 # esta maquina. Por eso el token es obligatorio salvo que se pida -NoAuth.
 $generatedToken = $false
+if ($NoAuth -and $AuthToken -ne "") {
+    throw "-NoAuth no se puede combinar con -AuthToken."
+}
 if ($NoAuth) {
     Write-Host ""
     Write-Host "  ADVERTENCIA: instalando SIN autenticacion (-NoAuth)." -ForegroundColor Red
@@ -121,6 +124,7 @@ if ($AllowFrom -ne "") {
 
 $installArgs = @("install", "--port", $Port)
 if ($AuthToken -ne "") { $installArgs += @("--auth-token", $AuthToken) }
+elseif ($NoAuth) { $installArgs += "--no-auth" }
 
 & $exeDest @installArgs
 & $exeDest start

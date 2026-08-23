@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -31,6 +32,8 @@ const (
 	WriteBufferSize = 64 * 1024
 	// PushInterval is how often to push system updates (2 seconds).
 	PushInterval = 2 * time.Second
+	// MaxClients limits the number of active WebSocket connections.
+	MaxClients = 128
 )
 
 // Server manages WebSocket connections and routes messages to handlers.
@@ -41,9 +44,10 @@ type Server struct {
 	authToken string
 	monitor   *system.Monitor
 
-	upgrader websocket.Upgrader
-	clients  map[*Client]bool
-	mu       sync.RWMutex
+	upgrader    websocket.Upgrader
+	clients     map[*Client]bool
+	mu          sync.RWMutex
+	readTimeout time.Duration
 
 	httpServer *http.Server
 	done       chan struct{}
@@ -51,13 +55,14 @@ type Server struct {
 
 // Client represents a single WebSocket connection.
 type Client struct {
-	conn     *websocket.Conn
-	server   *Server
-	send     chan []byte
-	id       string
-	authed   bool
-	closeMu  sync.Mutex
-	closed   bool
+	conn        *websocket.Conn
+	server      *Server
+	send        chan []byte
+	done        chan struct{}
+	id          string
+	readTimeout time.Duration
+	authed      atomic.Bool
+	closeOnce   sync.Once
 }
 
 // NewServer creates a new WebSocket server.
@@ -72,11 +77,12 @@ func NewServer(addr, certFile, keyFile, authToken string) *Server {
 			ReadBufferSize:  ReadBufferSize,
 			WriteBufferSize: WriteBufferSize,
 			CheckOrigin: func(r *http.Request) bool {
-				return true // LAN usage — allow all origins
+				return r.Header.Get("Origin") == ""
 			},
 		},
-		clients: make(map[*Client]bool),
-		done:    make(chan struct{}),
+		clients:     make(map[*Client]bool),
+		done:        make(chan struct{}),
+		readTimeout: ReadTimeout,
 	}
 }
 
@@ -149,13 +155,19 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	client := &Client{
-		conn:   conn,
-		server: s,
-		send:   make(chan []byte, 64),
-		id:     uuid.New().String(),
+		conn:        conn,
+		server:      s,
+		send:        make(chan []byte, 64),
+		done:        make(chan struct{}),
+		id:          uuid.New().String(),
+		readTimeout: s.readTimeout,
 	}
 
-	s.register(client)
+	if !s.register(client) {
+		log.Printf("[server] Rejecting client %s: maximum of %d active clients reached", client.id, MaxClients)
+		client.close()
+		return
+	}
 
 	// If auth is required, send auth_required immediately
 	if s.authToken != "" {
@@ -165,7 +177,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			Payload:   map[string]string{"message": "authentication required"},
 		})
 	} else {
-		client.authed = true
+		client.authed.Store(true)
 		client.sendAgentInfo()
 	}
 
@@ -173,31 +185,45 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	go client.readPump()
 }
 
-func (s *Server) register(c *Client) {
+func (s *Server) register(c *Client) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if len(s.clients) >= MaxClients {
+		return false
+	}
 	s.clients[c] = true
 	log.Printf("[server] Client connected: %s (%d active)", c.id, len(s.clients))
+	return true
 }
 
 func (s *Server) unregister(c *Client) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.clients[c]; ok {
+	_, ok := s.clients[c]
+	if ok {
 		delete(s.clients, c)
-		close(c.send)
-		log.Printf("[server] Client disconnected: %s (%d active)", c.id, len(s.clients))
+	}
+	active := len(s.clients)
+	s.mu.Unlock()
+
+	if ok {
+		c.close()
+		log.Printf("[server] Client disconnected: %s (%d active)", c.id, active)
 	}
 }
 
 func (s *Server) shutdown() error {
 	log.Println("[server] Shutting down...")
 
-	s.mu.Lock()
+	s.mu.RLock()
+	clients := make([]*Client, 0, len(s.clients))
 	for c := range s.clients {
+		clients = append(clients, c)
+	}
+	s.mu.RUnlock()
+
+	for _, c := range clients {
 		c.close()
 	}
-	s.mu.Unlock()
 
 	if s.httpServer != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -216,10 +242,9 @@ func (c *Client) readPump() {
 	}()
 
 	c.conn.SetReadLimit(MaxMessageSize)
-	c.conn.SetReadDeadline(time.Now().Add(ReadTimeout))
+	c.refreshReadDeadline()
 	c.conn.SetPongHandler(func(string) error {
-		c.conn.SetReadDeadline(time.Now().Add(ReadTimeout))
-		return nil
+		return c.refreshReadDeadline()
 	})
 
 	for {
@@ -235,6 +260,10 @@ func (c *Client) readPump() {
 		if err := json.Unmarshal(message, &msg); err != nil {
 			log.Printf("[client %s] Invalid message: %v", c.id, err)
 			continue
+		}
+		if err := c.refreshReadDeadline(); err != nil {
+			log.Printf("[client %s] Cannot refresh read deadline: %v", c.id, err)
+			break
 		}
 
 		if msg.ID == "" {
@@ -253,17 +282,14 @@ func (c *Client) writePump() {
 	ticker := time.NewTicker(PushInterval)
 	defer func() {
 		ticker.Stop()
-		c.conn.Close()
+		c.close()
 	}()
 
 	for {
 		select {
-		case message, ok := <-c.send:
-			if !ok {
-				// Channel closed
-				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
-				return
-			}
+		case <-c.done:
+			return
+		case message := <-c.send:
 			c.conn.SetWriteDeadline(time.Now().Add(WriteTimeout))
 			if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
 				log.Printf("[client %s] Write error: %v", c.id, err)
@@ -271,7 +297,7 @@ func (c *Client) writePump() {
 			}
 
 		case <-ticker.C:
-			if c.authed {
+			if c.authed.Load() {
 				c.pushSystemUpdate()
 			}
 		}
@@ -300,7 +326,7 @@ func (c *Client) sendAgentInfo() {
 			Arch:          info.Arch,
 			AgentVersion:  info.AgentVersion,
 			Port:          0, // filled by caller if needed
-			Authenticated: c.authed,
+			Authenticated: c.authed.Load(),
 		},
 	})
 }
@@ -313,6 +339,8 @@ func (c *Client) sendMsg(msg protocol.Message) {
 		return
 	}
 	select {
+	case <-c.done:
+		return
 	case c.send <- data:
 	default:
 		log.Printf("[client %s] Send buffer full, dropping message", c.id)
@@ -340,18 +368,28 @@ func (c *Client) sendResponse(requestID string, respType string, payload interfa
 }
 
 func (c *Client) close() {
-	c.closeMu.Lock()
-	defer c.closeMu.Unlock()
-	if !c.closed {
-		c.closed = true
-		c.conn.Close()
-	}
+	c.closeOnce.Do(func() {
+		close(c.done)
+		if c.conn != nil {
+			_ = c.conn.Close()
+		}
+	})
 }
 
 // sendJSON is a convenience for sending raw JSON bytes.
 func (c *Client) sendJSON(data []byte) {
 	select {
+	case <-c.done:
+		return
 	case c.send <- data:
 	default:
 	}
+}
+
+func (c *Client) refreshReadDeadline() error {
+	timeout := c.readTimeout
+	if timeout <= 0 {
+		timeout = ReadTimeout
+	}
+	return c.conn.SetReadDeadline(time.Now().Add(timeout))
 }
