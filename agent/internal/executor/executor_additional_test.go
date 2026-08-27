@@ -109,10 +109,9 @@ func TestExecuteCapsStdoutAtMaxOutputSize(t *testing.T) {
 			t.Skipf("PowerShell is unavailable for the output-cap test: %v", err)
 		}
 		shell = "powershell"
-		command = "Write-Output"
-		// Write-Output appends CRLF, so keep the command output exactly at the cap.
-		outputSize -= 2
-		args = []string{fmt.Sprintf("('x' * %d)", outputSize)}
+		command = "[Console]::Out.Write("
+		// Write directly to stdout to avoid the slower PowerShell formatting pipeline.
+		args = []string{fmt.Sprintf("'x' * %d)", outputSize)}
 	} else if _, err := exec.LookPath(command); err != nil {
 		t.Skipf("the output generator is unavailable: %v", err)
 	}
