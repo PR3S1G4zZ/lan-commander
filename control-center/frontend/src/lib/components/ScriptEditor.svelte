@@ -2,42 +2,78 @@
 	import { agents, type Script } from '../stores/agents';
 	import { addNotification } from '../stores/ui';
 	import { getScripts, saveScript, runScript } from '../utils/api';
+	import { getErrorMessage } from '../utils/format';
 	import Icon from './Icon.svelte';
 
 	let scripts = $state<Script[]>([]);
 	let selectedScript = $state<string | null>(null);
+	let selectedScriptContent = $state<string | null>(null);
 	let scriptName = $state('');
 	let scriptContent = $state('');
 	let targetAgentId = $state<string | null>(null);
 	let running = $state(false);
 	let output = $state('');
+	let loadError = $state<string | null>(null);
 
 	$effect(() => { loadScripts(); });
 
 	async function loadScripts() {
-		try { scripts = (await getScripts()) as Script[]; } catch {}
+		try {
+			scripts = (await getScripts()) as Script[];
+			loadError = null;
+		} catch (err) {
+			loadError = getErrorMessage(err);
+			addNotification('error', `Failed to load scripts: ${loadError}`);
+		}
 	}
 
 	function selectScript(name: string) {
 		const s = scripts.find(sc => sc.name === name);
-		if (s) { selectedScript = name; scriptName = s.name; scriptContent = s.content; }
+		if (s) {
+			selectedScript = name;
+			selectedScriptContent = s.content;
+			scriptName = s.name;
+			scriptContent = s.content;
+		}
 	}
 
 	async function save() {
 		if (!scriptName.trim() || !scriptContent.trim()) { addNotification('warning', 'Name and content required'); return; }
-		try { await saveScript(scriptName, scriptContent); addNotification('success', 'Script saved'); await loadScripts(); }
-		catch (err: any) { addNotification('error', `Save failed: ${err.message || err}`); }
+		const name = scriptName.trim();
+		try {
+			await saveScript(name, scriptContent);
+			scriptName = name;
+			selectedScript = name;
+			selectedScriptContent = scriptContent;
+			addNotification('success', 'Script saved');
+			await loadScripts();
+		} catch (err) { addNotification('error', `Save failed: ${getErrorMessage(err)}`); }
 	}
 
-	function newScript() { selectedScript = null; scriptName = ''; scriptContent = ''; output = ''; }
+	function newScript() {
+		selectedScript = null;
+		selectedScriptContent = null;
+		scriptName = '';
+		scriptContent = '';
+		output = '';
+	}
 
 	async function run() {
 		if (!scriptContent.trim() || !targetAgentId) { addNotification('warning', 'Select agent and write script'); return; }
 		running = true; output = '';
 		try {
-			const result: any = await runScript(targetAgentId, scriptName || 'unnamed', scriptContent);
+			const savedScriptName = selectedScript !== null &&
+				scriptName.trim() === selectedScript &&
+				scriptContent === selectedScriptContent
+				? selectedScript
+				: '';
+			const result: any = await runScript(targetAgentId, savedScriptName, savedScriptName ? '' : scriptContent);
 			output = `Exit: ${result.exit_code}\n${result.stdout || ''}${result.stderr ? '\nSTDERR:\n' + result.stderr : ''}`;
-		} catch (err: any) { output = `Error: ${err.message || err}`; }
+		} catch (err) {
+			const message = getErrorMessage(err);
+			output = `Error: ${message}`;
+			addNotification('error', `Run failed: ${message}`);
+		}
 		finally { running = false; }
 	}
 </script>
@@ -61,13 +97,14 @@
 					<Icon name="file-code" size={14} class="text-slate-500 shrink-0" /> <span class="truncate">{script.name}</span>
 				</button>
 			{/each}
-			{#if scripts.length === 0}<p class="text-xs text-slate-500 p-2">No saved scripts</p>{/if}
+			{#if loadError}<p class="text-xs text-red-400 p-2" role="alert">{loadError}</p>
+			{:else if scripts.length === 0}<p class="text-xs text-slate-500 p-2">No saved scripts</p>{/if}
 		</div>
 
 		<div class="flex-1 flex flex-col">
 			<div class="flex items-center gap-2 p-2 bg-slate-800/30 border-b border-slate-700 flex-wrap">
-				<input type="text" bind:value={scriptName} placeholder="Script name..." class="bg-slate-700 text-slate-200 rounded px-3 py-1.5 text-sm outline-none border border-slate-600 focus:border-cyan-500 max-w-xs" />
-				<select bind:value={targetAgentId} class="bg-slate-700 text-slate-200 rounded px-3 py-1.5 text-sm outline-none border border-slate-600">
+				<input type="text" bind:value={scriptName} aria-label="Script name" placeholder="Script name..." class="bg-slate-700 text-slate-200 rounded px-3 py-1.5 text-sm outline-none border border-slate-600 focus:border-cyan-500 max-w-xs" />
+				<select bind:value={targetAgentId} aria-label="Target agent" class="bg-slate-700 text-slate-200 rounded px-3 py-1.5 text-sm outline-none border border-slate-600">
 					<option value={null}>Select agent...</option>
 					{#each $agents.filter(a => a.connected) as agent (agent.id)}
 						<option value={agent.id}>{agent.name}</option>
@@ -76,7 +113,7 @@
 				<button class="px-3 py-1.5 rounded text-sm font-medium bg-slate-700 hover:bg-slate-600 text-slate-200 cursor-pointer border-none" onclick={save}>💾 Save</button>
 				<button class="px-3 py-1.5 rounded text-sm font-medium bg-cyan-600 hover:bg-cyan-500 text-white disabled:opacity-50 cursor-pointer border-none" onclick={run} disabled={running}>{running ? '⟳ Running...' : '▶ Run'}</button>
 			</div>
-			<textarea bind:value={scriptContent} placeholder="# One command per line&#10;echo Hello from LAN Commander" class="flex-1 bg-slate-900 text-slate-200 p-4 font-mono text-sm outline-none resize-none border-none"></textarea>
+			<textarea bind:value={scriptContent} aria-label="Script content" placeholder="# One command per line&#10;echo Hello from LAN Commander" class="flex-1 bg-slate-900 text-slate-200 p-4 font-mono text-sm outline-none resize-none border-none"></textarea>
 			{#if output}
 				<div class="border-t border-slate-700">
 					<div class="px-4 py-1 text-xs text-slate-500 bg-slate-800/30">Output</div>

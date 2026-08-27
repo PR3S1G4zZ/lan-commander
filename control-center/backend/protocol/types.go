@@ -4,29 +4,30 @@ import "time"
 
 // Message types (direction: client -> agent)
 const (
-	MsgExecCommand  = "exec_command"
-	MsgListDir      = "list_dir"
-	MsgGetFile      = "get_file"
-	MsgSendFile     = "send_file"
-	MsgScreenshot   = "screenshot"
-	MsgSystemInfo   = "system_info"
-	MsgAuth         = "auth"
-	MsgKeepAlive    = "keep_alive"
-	MsgScriptRun    = "script_run"
+	MsgExecCommand = "exec_command"
+	MsgListDir     = "list_dir"
+	MsgGetFile     = "get_file"
+	MsgSendFile    = "send_file"
+	MsgCancelFile  = "cancel_file"
+	MsgScreenshot  = "screenshot"
+	MsgSystemInfo  = "system_info"
+	MsgAuth        = "auth"
+	MsgKeepAlive   = "keep_alive"
+	MsgScriptRun   = "script_run"
 )
 
 // Message types (direction: agent -> client)
 const (
-	MsgCommandResult    = "command_result"
-	MsgDirContents      = "dir_contents"
-	MsgFileChunk        = "file_chunk"
-	MsgFileAck          = "file_ack"
-	MsgScreenshotData   = "screenshot_data"
-	MsgSystemUpdate     = "system_update"
-	MsgError            = "error"
-	MsgAuthRequired     = "auth_required"
-	MsgAuthOk           = "auth_ok"
-	MsgAgentInfo        = "agent_info"
+	MsgCommandResult  = "command_result"
+	MsgDirContents    = "dir_contents"
+	MsgFileChunk      = "file_chunk"
+	MsgFileAck        = "file_ack"
+	MsgScreenshotData = "screenshot_data"
+	MsgSystemUpdate   = "system_update"
+	MsgError          = "error"
+	MsgAuthRequired   = "auth_required"
+	MsgAuthOk         = "auth_ok"
+	MsgAgentInfo      = "agent_info"
 )
 
 // Message is the base envelope for all WebSocket messages
@@ -58,11 +59,18 @@ type GetFilePayload struct {
 }
 
 type SendFilePayload struct {
-	Path      string `json:"path"`
-	Data      []byte `json:"data,omitempty"`
-	Offset    int64  `json:"offset,omitempty"`
-	TotalSize int64  `json:"total_size,omitempty"`
-	Final     bool   `json:"final,omitempty"`
+	Path       string `json:"path"`
+	Data       []byte `json:"data,omitempty"`
+	Offset     int64  `json:"offset,omitempty"`
+	TotalSize  int64  `json:"total_size,omitempty"`
+	Final      bool   `json:"final,omitempty"`
+	Checksum   string `json:"checksum,omitempty"`
+	TransferID string `json:"transfer_id,omitempty"`
+}
+
+type CancelFilePayload struct {
+	Path       string `json:"path"`
+	TransferID string `json:"transfer_id"`
 }
 
 type AuthPayload struct {

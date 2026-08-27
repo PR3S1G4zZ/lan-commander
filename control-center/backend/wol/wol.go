@@ -32,6 +32,11 @@ func (s *Sender) Send(macAddr string, broadcastIP string) error {
 	if broadcastIP == "" {
 		broadcastIP = "255.255.255.255"
 	}
+	broadcastAddr := net.ParseIP(broadcastIP)
+	if broadcastAddr == nil || broadcastAddr.To4() == nil {
+		return fmt.Errorf("invalid broadcast IP %q", broadcastIP)
+	}
+	broadcastAddr = broadcastAddr.To4()
 
 	// Build magic packet: 6 bytes of 0xFF + 16 repetitions of the MAC address
 	packet := make([]byte, 102)
@@ -44,15 +49,19 @@ func (s *Sender) Send(macAddr string, broadcastIP string) error {
 
 	// Resolve UDP address
 	addr := &net.UDPAddr{
-		IP:   net.ParseIP(broadcastIP),
+		IP:   broadcastAddr,
 		Port: 9,
 	}
 
 	// Dial UDP connection
 	var conn net.Conn
 	if s.localAddr != "" {
+		localIP := net.ParseIP(s.localAddr)
+		if localIP == nil || localIP.To4() == nil {
+			return fmt.Errorf("invalid local IP %q", s.localAddr)
+		}
 		localAddr := &net.UDPAddr{
-			IP:   net.ParseIP(s.localAddr),
+			IP:   localIP.To4(),
 			Port: 0,
 		}
 		conn, err = net.DialUDP("udp", localAddr, addr)

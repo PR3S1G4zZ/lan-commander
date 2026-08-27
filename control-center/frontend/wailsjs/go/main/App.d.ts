@@ -8,11 +8,15 @@ import {session} from '../models';
 
 export function ChooseSavePath(arg1:string):Promise<string>;
 
-export function ConnectAgent(arg1:string,arg2:number,arg3:string,arg4:boolean):Promise<void>;
+export function ConnectAgent(arg1:string,arg2:number,arg3:string):Promise<void>;
+
+export function ConnectAgentSecure(arg1:string,arg2:number,arg3:string,arg4:string,arg5:string):Promise<void>;
 
 export function DeleteSession(arg1:number):Promise<void>;
 
 export function DisconnectAgent(arg1:string):Promise<void>;
+
+export function DownloadFile(arg1:string,arg2:string):Promise<void>;
 
 export function ExecCommand(arg1:string,arg2:string,arg3:number):Promise<protocol.CommandResultPayload>;
 
@@ -36,8 +40,14 @@ export function RunScript(arg1:string,arg2:string,arg3:string):Promise<protocol.
 
 export function SaveScript(arg1:string,arg2:string):Promise<void>;
 
-export function SaveSession(arg1:string,arg2:number,arg3:string,arg4:string,arg5:boolean):Promise<void>;
+export function SaveSession(arg1:string,arg2:number,arg3:string,arg4:string):Promise<void>;
+
+export function SaveSessionSecure(arg1:string,arg2:number,arg3:string,arg4:string,arg5:string,arg6:string):Promise<void>;
 
 export function TransferFile(arg1:string,arg2:string,arg3:string):Promise<void>;
+
+export function UploadFile(arg1:string,arg2:string):Promise<void>;
+
+export function UploadFileFromPath(arg1:string,arg2:string,arg3:string):Promise<void>;
 
 export function WakeOnLAN(arg1:string,arg2:string):Promise<void>;

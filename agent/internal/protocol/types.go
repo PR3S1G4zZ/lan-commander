@@ -8,6 +8,7 @@ const (
 	MsgListDir      = "list_dir"
 	MsgGetFile      = "get_file"
 	MsgSendFile     = "send_file"
+	MsgCancelFile   = "cancel_file"
 	MsgScreenshot   = "screenshot"
 	MsgSystemInfo   = "system_info"
 	MsgAuth         = "auth"
@@ -58,11 +59,18 @@ type GetFilePayload struct {
 }
 
 type SendFilePayload struct {
-	Path      string `json:"path"`
-	Data      []byte `json:"data,omitempty"`
-	Offset    int64  `json:"offset,omitempty"`
-	TotalSize int64  `json:"total_size,omitempty"`
-	Final     bool   `json:"final,omitempty"`
+	Path       string `json:"path"`
+	Data       []byte `json:"data,omitempty"`
+	Offset     int64  `json:"offset,omitempty"`
+	TotalSize  int64  `json:"total_size,omitempty"`
+	Final      bool   `json:"final,omitempty"`
+	Checksum   string `json:"checksum,omitempty"`
+	TransferID string `json:"transfer_id,omitempty"`
+}
+
+type CancelFilePayload struct {
+	Path       string `json:"path"`
+	TransferID string `json:"transfer_id"`
 }
 
 type AuthPayload struct {

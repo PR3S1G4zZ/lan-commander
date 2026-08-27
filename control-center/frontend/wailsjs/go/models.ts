@@ -372,6 +372,9 @@ export namespace session {
 	    port: number;
 	    secure: boolean;
 	    auth_token?: string;
+	    tls?: boolean;
+	    ca_file?: string;
+	    server_name?: string;
 	    // Go type: time
 	    created_at: any;
 	    // Go type: time
@@ -389,6 +392,9 @@ export namespace session {
 	        this.port = source["port"];
 	        this.secure = source["secure"];
 	        this.auth_token = source["auth_token"];
+	        this.tls = source["tls"];
+	        this.ca_file = source["ca_file"];
+	        this.server_name = source["server_name"];
 	        this.created_at = this.convertValues(source["created_at"], null);
 	        this.last_connected = this.convertValues(source["last_connected"], null);
 	    }

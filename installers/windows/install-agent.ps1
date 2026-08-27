@@ -49,6 +49,9 @@ if (-not (Test-Path $sourceUi)) { throw "No se encontro $uiName junto a este scr
 
 Write-Host "Instalando LAN Commander Agent..." -ForegroundColor Cyan
 $generatedToken = $false
+if ($NoAuth -and $AuthToken -ne "") {
+    throw "-NoAuth no se puede combinar con -AuthToken."
+}
 if ($NoAuth) {
     Write-Host "ADVERTENCIA: instalando SIN autenticacion." -ForegroundColor Red
     $AuthToken = ""
@@ -78,7 +81,8 @@ New-NetFirewallRule @fwParams | Out-Null
 & $exeDest stop 2>$null | Out-Null
 & $exeDest uninstall 2>$null | Out-Null
 $installArgs = @("install", "--port", $Port)
-if ($AuthToken) { $installArgs += @("--auth-token", $AuthToken) }
+if ($AuthToken -ne "") { $installArgs += @("--auth-token", $AuthToken) }
+elseif ($NoAuth) { $installArgs += "--no-auth" }
 if ($TlsCert) { $installArgs += @("--tls-cert", $TlsCert, "--tls-key", $TlsKey) }
 & $exeDest @installArgs
 & $exeDest start

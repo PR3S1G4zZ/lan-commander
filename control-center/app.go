@@ -2,12 +2,8 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -21,8 +17,10 @@ import (
 	"control-center/backend/protocol"
 	"control-center/backend/scripting"
 	"control-center/backend/session"
+	"control-center/backend/transfer"
 	"control-center/backend/wol"
-	"github.com/wailsapp/wails/v2/pkg/runtime"
+
+	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 const (
@@ -115,7 +113,12 @@ func (a *App) startup(ctx context.Context) {
 		}
 
 		for _, s := range savedSessions {
-			agentID, err := a.clientMgr.Connect(s.Host, s.Port, s.AuthToken, s.Secure)
+			agentID, err := a.clientMgr.ConnectWithOptions(s.Host, s.Port, client.ConnectOptions{
+				AuthToken:  s.AuthToken,
+				TLS:        s.TLS || s.Secure,
+				CAFile:     s.CAFile,
+				ServerName: s.ServerName,
+			})
 			if err != nil {
 				log.Printf("app: failed to reconnect to %s:%d: %v", s.Host, s.Port, err)
 				continue
@@ -180,12 +183,12 @@ func (a *App) onAgentDiscovered(d discovery.AgentDiscovered) {
 		}
 	}
 
-	// Reuse the token of a saved session for this host:port if we have one.
+	// Reuse the transport and token of a saved session for this host:port if we have one.
 	// Agents are token-protected by default, so a blind anonymous connect
 	// would just be rejected.
-	token, secure := a.savedTokenFor(d.Host, d.Port)
+	options := a.savedOptionsFor(d.Host, d.Port)
 
-	if _, err := a.clientMgr.Connect(d.Host, d.Port, token, secure); err != nil {
+	if _, err := a.clientMgr.ConnectWithOptions(d.Host, d.Port, options); err != nil {
 		if errors.Is(err, client.ErrAuthRequired) {
 			// Expected for any agent we have no credentials for: surface it in
 			// the audit log so the admin knows to add it manually, and stop.
@@ -198,34 +201,30 @@ func (a *App) onAgentDiscovered(d discovery.AgentDiscovered) {
 	}
 }
 
-// savedTokenFor returns the token and transport mode of a saved session.
-func (a *App) savedTokenFor(host string, port int) (string, bool) {
-
+// savedOptionsFor returns the connection options of a saved session matching
+// host:port, or anonymous plaintext defaults when none exists.
+func (a *App) savedOptionsFor(host string, port int) client.ConnectOptions {
 	if a.sessions == nil {
-
-		return "", false
-
+		return client.ConnectOptions{}
 	}
 
 	saved, err := a.sessions.LoadAll()
 
 	if err != nil {
-
-		return "", false
-
+		return client.ConnectOptions{}
 	}
 
 	for _, s := range saved {
-
 		if s.Host == host && s.Port == port {
-
-			return s.AuthToken, s.Secure
-
+			return client.ConnectOptions{
+				AuthToken:  s.AuthToken,
+				TLS:        s.TLS || s.Secure,
+				CAFile:     s.CAFile,
+				ServerName: s.ServerName,
+			}
 		}
-
 	}
-
-	return "", false
+	return client.ConnectOptions{}
 }
 
 // --- Agent Message Callback ---
@@ -263,7 +262,22 @@ func (a *App) GetAgents() []client.AgentInfo {
 // --- Binding: ConnectAgent ---
 
 // ConnectAgent establishes a WebSocket connection to an agent.
-func (a *App) ConnectAgent(host string, port int, authToken string, secure bool) error {
+func (a *App) ConnectAgent(host string, port int, authToken string) error {
+	return a.connectAgentWithOptions(host, port, client.ConnectOptions{AuthToken: authToken})
+}
+
+// ConnectAgentSecure establishes a TLS-verified WebSocket connection to an agent.
+// CAFile is optional when the certificate is trusted by the operating system.
+func (a *App) ConnectAgentSecure(host string, port int, authToken string, caFile string, serverName string) error {
+	return a.connectAgentWithOptions(host, port, client.ConnectOptions{
+		AuthToken:  authToken,
+		TLS:        true,
+		CAFile:     caFile,
+		ServerName: serverName,
+	})
+}
+
+func (a *App) connectAgentWithOptions(host string, port int, options client.ConnectOptions) error {
 	if host == "" {
 		return fmt.Errorf("host cannot be empty")
 	}
@@ -274,7 +288,7 @@ func (a *App) ConnectAgent(host string, port int, authToken string, secure bool)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	agentID, err := a.clientMgr.Connect(host, port, authToken, secure)
+	agentID, err := a.clientMgr.ConnectWithOptions(host, port, options)
 	if err != nil {
 		a.audit.Log("connect", "", "user", fmt.Sprintf("Failed to connect to %s:%d: %v", host, port, err), audit.StatusError)
 		return fmt.Errorf("failed to connect to agent: %w", err)
@@ -283,18 +297,25 @@ func (a *App) ConnectAgent(host string, port int, authToken string, secure bool)
 	a.audit.Log("connect", agentID, "user", fmt.Sprintf("Connected to %s:%d", host, port), audit.StatusSuccess)
 
 	// Auto-save session
-	s := session.Session{
-		Name:      fmt.Sprintf("%s:%d", host, port),
-		Host:      host,
-		Port:      port,
-		AuthToken: authToken,
-		Secure:    secure,
-	}
+	s := sessionForConnectionOptions(host, port, fmt.Sprintf("%s:%d", host, port), options)
 	if _, err := a.sessions.Save(s); err != nil {
 		log.Printf("app: failed to save session: %v", err)
 	}
 
 	return nil
+}
+
+func sessionForConnectionOptions(host string, port int, name string, options client.ConnectOptions) session.Session {
+	return session.Session{
+		Name:       name,
+		Host:       host,
+		Port:       port,
+		AuthToken:  options.AuthToken,
+		Secure:     options.TLS || options.UseTLS,
+		TLS:        options.TLS || options.UseTLS,
+		CAFile:     options.CAFile,
+		ServerName: options.ServerName,
+	}
 }
 
 // --- Binding: DisconnectAgent ---
@@ -333,13 +354,23 @@ func (a *App) ExecCommand(agentID string, command string, timeout int) (*protoco
 		duration = time.Duration(timeout) * time.Second
 	}
 
-	a.audit.Log("exec_command", agentID, "user", fmt.Sprintf("Command: %s", command), audit.StatusSuccess)
-
 	result, err := a.requestCommandResult(agentID, command, duration)
 	if err != nil {
 		a.audit.Log("exec_command", agentID, "user", fmt.Sprintf("Command failed: %v", err), audit.StatusError)
 		return nil, fmt.Errorf("command execution failed: %w", err)
 	}
+	if result == nil {
+		err := fmt.Errorf("agent returned an empty command result")
+		a.audit.Log("exec_command", agentID, "user", fmt.Sprintf("Command failed: %v", err), audit.StatusError)
+		return nil, err
+	}
+
+	status := audit.StatusSuccess
+	if result.ExitCode != 0 {
+		status = audit.StatusError
+	}
+	a.audit.Log("exec_command", agentID, "user",
+		fmt.Sprintf("Command: %s (exit code: %d)", command, result.ExitCode), status)
 
 	return result, nil
 }
@@ -361,6 +392,8 @@ func (a *App) ExecCommandMulti(agentIDs []string, command string, timeout int) m
 
 	var mu sync.Mutex
 	var wg sync.WaitGroup
+	succeeded := 0
+	failed := 0
 
 	for _, agentID := range agentIDs {
 		wg.Add(1)
@@ -369,14 +402,28 @@ func (a *App) ExecCommandMulti(agentIDs []string, command string, timeout int) m
 
 			result, err := a.requestCommandResult(id, command, duration)
 			mu.Lock()
-			if err != nil {
+			switch {
+			case err != nil:
 				results[id] = &protocol.CommandResultPayload{
 					Stdout:   "",
 					Stderr:   err.Error(),
 					ExitCode: -1,
 				}
-			} else {
+				failed++
+			case result == nil:
+				results[id] = &protocol.CommandResultPayload{
+					Stdout:   "",
+					Stderr:   "agent returned an empty command result",
+					ExitCode: -1,
+				}
+				failed++
+			default:
 				results[id] = result
+				if result.ExitCode == 0 {
+					succeeded++
+				} else {
+					failed++
+				}
 			}
 			mu.Unlock()
 		}(agentID)
@@ -384,9 +431,15 @@ func (a *App) ExecCommandMulti(agentIDs []string, command string, timeout int) m
 
 	wg.Wait()
 
+	status := audit.StatusSuccess
+	if failed == len(agentIDs) {
+		status = audit.StatusError
+	} else if failed > 0 {
+		status = audit.StatusWarning
+	}
 	a.audit.Log("exec_command_multi", "", "user",
-		fmt.Sprintf("Executed command on %d agents: %s", len(agentIDs), command),
-		audit.StatusSuccess)
+		fmt.Sprintf("Executed command on %d agents: %d succeeded, %d failed: %s",
+			len(agentIDs), succeeded, failed, command), status)
 
 	return results
 }
@@ -467,7 +520,7 @@ func (a *App) ChooseSavePath(defaultFilename string) (string, error) {
 
 	}
 
-	path, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
+	path, err := wailsruntime.SaveFileDialog(a.ctx, wailsruntime.SaveDialogOptions{
 
 		Title: "Guardar archivo remoto",
 
@@ -500,119 +553,100 @@ func (a *App) TransferFile(agentID string, remotePath string, localPath string) 
 	if localPath == "" {
 		return fmt.Errorf("local path cannot be empty")
 	}
-
-	localPath, err := filepath.Abs(localPath)
-	if err != nil {
-		return fmt.Errorf("invalid local path: %w", err)
+	if err := transfer.Download(context.Background(), a.clientMgr, agentID, remotePath, localPath, defaultTimeout); err != nil {
+		if a.audit != nil {
+			a.audit.Log("transfer_download", agentID, "user", fmt.Sprintf("Remote: %s -> Local: %s; failed: %v", remotePath, localPath, err), audit.StatusError)
+		}
+		return err
 	}
-	parentDir := filepath.Dir(localPath)
-	info, err := os.Stat(parentDir)
-	if err != nil {
-		return fmt.Errorf("local directory is not accessible: %w", err)
+	if a.audit != nil {
+		a.audit.Log("transfer_download", agentID, "user", fmt.Sprintf("Remote: %s -> Local: %s", remotePath, localPath), audit.StatusSuccess)
 	}
-	if !info.IsDir() {
-		return fmt.Errorf("local path parent is not a directory: %s", parentDir)
-	}
-
-	partFile, err := os.CreateTemp(parentDir, ".lan-commander-download-*")
-	if err != nil {
-		return fmt.Errorf("cannot create temporary download: %w", err)
-	}
-	partPath := partFile.Name()
-	defer os.Remove(partPath)
-
-	const chunkSize = 64 * 1024
-	var offset int64
-	var totalSize int64 = -1
-
-	for {
-		response, requestErr := a.clientMgr.SendRequest(agentID, protocol.MsgGetFile, protocol.GetFilePayload{
-			Path:      remotePath,
-			Offset:    offset,
-			ChunkSize: chunkSize,
-		}, defaultTimeout)
-		if requestErr != nil {
-			_ = partFile.Close()
-			a.audit.Log("transfer_file", agentID, "user", fmt.Sprintf("Failed: %v", requestErr), audit.StatusError)
-			return fmt.Errorf("file transfer failed: %w", requestErr)
-		}
-
-		payloadBytes, marshalErr := json.Marshal(response.Payload)
-		if marshalErr != nil {
-			_ = partFile.Close()
-			return fmt.Errorf("invalid file chunk response: %w", marshalErr)
-		}
-		var chunk protocol.FileChunkPayload
-		if unmarshalErr := json.Unmarshal(payloadBytes, &chunk); unmarshalErr != nil {
-			_ = partFile.Close()
-			return fmt.Errorf("invalid file chunk response: %w", unmarshalErr)
-		}
-		if chunk.Offset != offset {
-			_ = partFile.Close()
-			return fmt.Errorf("file chunk offset mismatch: received %d, expected %d", chunk.Offset, offset)
-		}
-		if totalSize < 0 {
-			totalSize = chunk.TotalSize
-		} else if chunk.TotalSize != totalSize {
-			_ = partFile.Close()
-			return fmt.Errorf("file size changed during transfer")
-		}
-		if totalSize < 0 || offset+int64(len(chunk.Data)) > totalSize {
-			_ = partFile.Close()
-			return fmt.Errorf("invalid file chunk size")
-		}
-		if len(chunk.Data) > 0 {
-			if _, writeErr := partFile.WriteAt(chunk.Data, offset); writeErr != nil {
-				_ = partFile.Close()
-				return fmt.Errorf("cannot write downloaded chunk: %w", writeErr)
-			}
-		}
-		offset += int64(len(chunk.Data))
-		if chunk.Final {
-			if offset != totalSize {
-				_ = partFile.Close()
-				return fmt.Errorf("final chunk ended at %d, expected %d", offset, totalSize)
-			}
-			if chunk.Checksum != "" {
-				if err := verifyFileChecksum(partFile, chunk.Checksum); err != nil {
-					_ = partFile.Close()
-					return err
-				}
-			}
-			break
-		}
-		if len(chunk.Data) == 0 {
-			_ = partFile.Close()
-			return fmt.Errorf("agent returned an empty non-final file chunk")
-		}
-	}
-
-	if err := partFile.Close(); err != nil {
-		return fmt.Errorf("cannot close downloaded file: %w", err)
-	}
-	if err := os.Rename(partPath, localPath); err != nil {
-		return fmt.Errorf("cannot finalize downloaded file %q: %w", localPath, err)
-	}
-
-	a.audit.Log("transfer_file", agentID, "user",
-		fmt.Sprintf("Remote: %s -> Local: %s (%d bytes)", remotePath, localPath, totalSize),
-		audit.StatusSuccess)
 	return nil
 }
 
-func verifyFileChecksum(file *os.File, expected string) error {
-	if _, err := file.Seek(0, 0); err != nil {
-		return fmt.Errorf("cannot verify downloaded file: %w", err)
+// UploadFileFromPath streams a local file to an agent and commits it remotely
+// only after the agent validates the final size and SHA-256 checksum.
+func (a *App) UploadFileFromPath(agentID string, localPath string, remotePath string) error {
+	if agentID == "" {
+		return fmt.Errorf("agent ID cannot be empty")
 	}
-	h := sha256.New()
-	if _, err := io.Copy(h, file); err != nil {
-		return fmt.Errorf("cannot verify downloaded file: %w", err)
+	if localPath == "" {
+		return fmt.Errorf("local path cannot be empty")
 	}
-	actual := hex.EncodeToString(h.Sum(nil))
-	if !strings.EqualFold(actual, expected) {
-		return fmt.Errorf("download checksum mismatch")
+	if remotePath == "" {
+		return fmt.Errorf("remote path cannot be empty")
+	}
+	if err := transfer.Upload(context.Background(), a.clientMgr, agentID, localPath, remotePath, defaultTimeout); err != nil {
+		if a.audit != nil {
+			a.audit.Log("transfer_upload", agentID, "user", fmt.Sprintf("Local: %s -> Remote: %s; failed: %v", localPath, remotePath, err), audit.StatusError)
+		}
+		return err
+	}
+	if a.audit != nil {
+		a.audit.Log("transfer_upload", agentID, "user", fmt.Sprintf("Local: %s -> Remote: %s", localPath, remotePath), audit.StatusSuccess)
 	}
 	return nil
+}
+
+// DownloadFile opens the native save dialog and downloads the selected remote file.
+func (a *App) DownloadFile(agentID string, remotePath string) error {
+	if agentID == "" {
+		return fmt.Errorf("agent ID cannot be empty")
+	}
+	if remotePath == "" {
+		return fmt.Errorf("remote path cannot be empty")
+	}
+	if a.ctx == nil {
+		return fmt.Errorf("application context is not initialized")
+	}
+	localPath, err := wailsruntime.SaveFileDialog(a.ctx, wailsruntime.SaveDialogOptions{
+		Title:           "Download file",
+		DefaultFilename: filepath.Base(remotePath),
+	})
+	if err != nil {
+		return fmt.Errorf("open download dialog: %w", err)
+	}
+	if localPath == "" {
+		return nil
+	}
+	return a.TransferFile(agentID, remotePath, localPath)
+}
+
+// UploadFile opens the native open dialog and uploads the selected file into
+// the requested remote directory.
+func (a *App) UploadFile(agentID string, remoteDirectory string) error {
+	if agentID == "" {
+		return fmt.Errorf("agent ID cannot be empty")
+	}
+	if remoteDirectory == "" {
+		return fmt.Errorf("remote directory cannot be empty")
+	}
+	if a.ctx == nil {
+		return fmt.Errorf("application context is not initialized")
+	}
+	localPath, err := wailsruntime.OpenFileDialog(a.ctx, wailsruntime.OpenDialogOptions{
+		Title: "Upload file",
+	})
+	if err != nil {
+		return fmt.Errorf("open upload dialog: %w", err)
+	}
+	if localPath == "" {
+		return nil
+	}
+	remotePath := joinRemotePath(remoteDirectory, filepath.Base(localPath))
+	return a.UploadFileFromPath(agentID, localPath, remotePath)
+}
+
+func joinRemotePath(directory, name string) string {
+	if strings.HasSuffix(directory, "/") || strings.HasSuffix(directory, "\\") {
+		return directory + name
+	}
+	separator := "/"
+	if strings.Contains(directory, "\\") {
+		separator = "\\"
+	}
+	return directory + separator + name
 }
 
 // --- Binding: WakeOnLAN ---
@@ -641,7 +675,21 @@ func (a *App) WakeOnLAN(macAddr string, broadcastIP string) error {
 // SaveSession saves a connection as a persistent session. The auth token must
 // be included: without it, reconnecting on the next launch fails against any
 // agent that requires authentication (which is now the installer default).
-func (a *App) SaveSession(host string, port int, name string, authToken string, secure bool) error {
+func (a *App) SaveSession(host string, port int, name string, authToken string) error {
+	return a.saveSessionWithOptions(host, port, name, client.ConnectOptions{AuthToken: authToken})
+}
+
+// SaveSessionSecure stores a TLS-enabled connection for future reconnects.
+func (a *App) SaveSessionSecure(host string, port int, name string, authToken string, caFile string, serverName string) error {
+	return a.saveSessionWithOptions(host, port, name, client.ConnectOptions{
+		AuthToken:  authToken,
+		TLS:        true,
+		CAFile:     caFile,
+		ServerName: serverName,
+	})
+}
+
+func (a *App) saveSessionWithOptions(host string, port int, name string, options client.ConnectOptions) error {
 	if host == "" {
 		return fmt.Errorf("host cannot be empty")
 	}
@@ -652,13 +700,7 @@ func (a *App) SaveSession(host string, port int, name string, authToken string, 
 		name = fmt.Sprintf("%s:%d", host, port)
 	}
 
-	s := session.Session{
-		Name:      name,
-		Host:      host,
-		Port:      port,
-		AuthToken: authToken,
-		Secure:    secure,
-	}
+	s := sessionForConnectionOptions(host, port, name, options)
 
 	if _, err := a.sessions.Save(s); err != nil {
 		a.audit.Log("save_session", "", "user", fmt.Sprintf("Failed to save session: %v", err), audit.StatusError)
@@ -791,6 +833,9 @@ func (a *App) RunScript(agentID string, scriptName string, scriptContent string)
 
 // GetAuditLogs returns the most recent audit log entries.
 func (a *App) GetAuditLogs(limit int) []audit.Entry {
+	if a.audit == nil {
+		return []audit.Entry{}
+	}
 	return a.audit.GetRecent(limit)
 }
 

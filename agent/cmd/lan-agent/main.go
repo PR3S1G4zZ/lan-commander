@@ -25,6 +25,7 @@ type agentFlags struct {
 	tlsCert          string
 	tlsKey           string
 	authToken        string
+	noAuth           bool
 }
 
 func parseAgentFlags(fs *flag.FlagSet, args []string) *agentFlags {
@@ -36,8 +37,22 @@ func parseAgentFlags(fs *flag.FlagSet, args []string) *agentFlags {
 	fs.StringVar(&f.tlsCert, "tls-cert", "", "TLS certificate file path")
 	fs.StringVar(&f.tlsKey, "tls-key", "", "TLS private key file path")
 	fs.StringVar(&f.authToken, "auth-token", "", "Authentication token for client connections")
+	fs.BoolVar(&f.noAuth, "no-auth", false, "Disable authentication (only for an isolated laboratory network)")
 	_ = fs.Parse(args)
 	return f
+}
+
+func validateAgentFlags(f *agentFlags) error {
+	if f.noAuth && f.authToken != "" {
+		return fmt.Errorf("--no-auth cannot be combined with --auth-token")
+	}
+	if f.noAuth {
+		return nil
+	}
+	if f.authToken == "" {
+		return fmt.Errorf("authentication token is required: pass --auth-token <token>, or explicitly use --no-auth only on an isolated laboratory network")
+	}
+	return nil
 }
 
 // program implements service.Interface so the same binary can run in the
@@ -48,6 +63,10 @@ type program struct {
 }
 
 func (p *program) Start(s service.Service) error {
+	if err := validateAgentFlags(p.flags); err != nil {
+		return err
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	p.cancel = cancel
 	go p.run(ctx)

@@ -67,6 +67,7 @@ Aplicacion de escritorio construida con Wails. Incluye:
 
 - Descubrimiento de agentes por mDNS.
 - Conexion WebSocket y autenticacion por token.
+- Conexion opcional `wss` con validacion de certificados, CA personalizada y nombre de servidor.
 - Dashboard de CPU, memoria, discos, red y uptime.
 - Ejecucion de comandos individuales y multi-equipo.
 - Explorador de archivos.
@@ -385,10 +386,43 @@ control-center\build\bin\lan-commander.exe
 
 ```powershell
 cd control-center\frontend
-npm install
+npm ci
 npm run check
 npm run build
 ```
+
+### Verificacion de artefactos de release
+
+`build-all.ps1` genera `release-manifest.sha256` en la raiz con los hashes
+SHA-256 deterministas de estas cinco salidas:
+
+```text
+agent\build\lan-agent.exe
+agent\build\lan-agent-linux
+installers\windows\lan-agent.exe
+installers\linux\lan-agent-linux
+control-center\build\bin\lan-commander.exe
+```
+
+Verifica el manifiesto después de transferir los artefactos:
+
+```powershell
+.\scripts\verify-release-manifest.ps1 -ManifestPath .\release-manifest.sha256
+```
+
+La verificación detecta archivos faltantes, modificados o entradas inválidas.
+`build-agent.ps1` también actualiza el manifiesto con las salidas del
+`-Target` solicitado; para un release completo usa `build-all.ps1`.
+
+El manifiesto SHA-256 no autentica por sí solo el origen de los artefactos.
+La firma requiere material externo de release —por ejemplo, una clave privada
+protegida para firmar y una clave pública o cadena de confianza distribuida por
+un canal confiable—, que no se genera ni se almacena en este repositorio. El
+generador informa explícitamente cuando el manifiesto queda sin firma; si se
+dispone de un firmador externo, puede invocarse con
+`-SigningCommand <comando>`. El script le pasa automáticamente la ruta del
+manifiesto como argumento y la firma debe verificarse según el procedimiento
+de ese material de confianza.
 
 ### Verificar Go
 
@@ -415,7 +449,7 @@ go vet ./...
 ### Limitaciones conocidas
 
 - TLS es opcional por defecto; el agente y el Control Center soportan TLS end-to-end mediante `wss://`. Activalo al conectar y usa certificados confiables.
-- Los tokens guardados en la base local no estan cifrados en reposo.
+- En Windows, los tokens guardados se protegen con DPAPI. En plataformas sin almacen seguro nativo, el guardado de sesiones con token falla de forma segura.
 - `CheckOrigin` restringe origenes de navegador no autorizados; aun asi no expongas el puerto directamente a Internet.
 - `--no-auth` elimina la proteccion del agente y no debe usarse en produccion.
 - El control remoto permite operaciones privilegiadas; debe existir autorizacion clara de los usuarios y de la organizacion.
@@ -428,7 +462,7 @@ go vet ./...
 4. Usa una VLAN o red de administracion separada cuando sea posible.
 5. Protege el equipo administrador y sus archivos SQLite.
 6. Informa a los usuarios cuando sus equipos esten gestionados.
-7. Planifica mTLS como evolucion de la autenticacion compartida por token.
+7. Para despliegues de mayor exigencia, planifica mTLS como evolucion de la autenticacion compartida por token.
 
 ## Estructura del repositorio
 
@@ -458,13 +492,18 @@ La verificacion realizada para esta version incluye:
 - `go test -p 1 ./... -race` en el agente.
 - `go vet ./...` en el agente.
 - `go test ./...` y `go vet ./...` en el Control Center.
+- `go test -race ./...` en ambos modulos Go.
+- `npm test` con Vitest.
 - `npm run check` sin errores ni avisos.
 - `npm run build` del frontend.
 - Compilacion de produccion del Control Center y de `lan-agent-ui`.
 - Compilacion cruzada del agente para Linux amd64.
 - Analisis sintactico de los scripts PowerShell.
+- Generacion y verificacion de `release-manifest.sha256`, incluida deteccion de artefactos alterados.
 
-El chequeo `bash -n` debe ejecutarse en Linux o WSL; el entorno Windows usado para esta auditoria no tenia disponible el subsistema Bash.
+El chequeo `bash -n installers/linux/install-agent.sh` pasa con Git Bash en Windows. La instalacion real debe validarse en una maquina Linux limpia con systemd y el firewall que se vaya a utilizar.
+
+El workflow [CI](.github/workflows/ci.yml) repite las pruebas Go, la comprobacion del frontend, la sintaxis de los instaladores y el build de release en GitHub Actions. El job de release conserva el manifiesto junto con los cinco artefactos generados.
 
 ## Estado y proximas mejoras
 
@@ -477,6 +516,9 @@ El chequeo `bash -n` debe ejecutarse en Linux o WSL; el entorno Windows usado pa
 - Ejecucion de comandos y scripts.
 - Metricas del sistema.
 - Explorador y transferencia de archivos por bloques con SHA-256.
+- Desconexion desde la interfaz activa y acciones de carga/descarga con dialogos nativos.
+- TLS opcional con validacion de certificados y reconexion con la misma configuracion.
+- Proteccion de tokens persistidos mediante DPAPI en Windows.
 - Captura de pantalla en backend.
 - Wake-on-LAN.
 - Sesiones y auditoria SQLite.
@@ -487,8 +529,10 @@ El chequeo `bash -n` debe ejecutarse en Linux o WSL; el entorno Windows usado pa
 - Bandeja del sistema para la interfaz visual.
 - Notificaciones de actividad y solicitudes de ayuda.
 - Registro de actividad visible para el usuario final.
+- TLS por defecto con validacion de certificados.
+- Firma externa y verificacion de confianza del manifiesto de release.
 - TLS obligatorio por politica en despliegues empresariales.
-- Cifrado de tokens en reposo y pruebas de integracion de instaladores.
+- Pruebas de integracion de instaladores.
 - Mas pruebas de integracion y pruebas reales de instalacion en Windows y Linux.
 
 ## Documentacion relacionada

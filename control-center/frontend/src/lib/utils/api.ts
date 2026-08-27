@@ -43,6 +43,7 @@ function normalizeAgent(raw: Record<string, unknown>): AgentInfo {
 		secure: Boolean(raw.secure),
 		lastSeen: (raw.last_seen ?? raw.lastSeen ?? '') as string,
 		systemInfo: (raw.system_info ?? raw.systemInfo ?? null) as AgentInfo['systemInfo'],
+		systemInfoError: null,
 		cpuHistory: [],
 	};
 }
@@ -54,7 +55,18 @@ export async function getAgents(): Promise<AgentInfo[]> {
 }
 
 export async function connectAgent(host: string, port: number, authToken: string = '', secure: boolean = false) {
-	return callBinding('ConnectAgent', host, port, authToken, secure);
+	if (secure) return connectAgentSecure(host, port, authToken);
+	return callBinding('ConnectAgent', host, port, authToken);
+}
+
+export async function connectAgentSecure(
+	host: string,
+	port: number,
+	authToken: string = '',
+	caFile: string = '',
+	serverName: string = '',
+) {
+	return callBinding('ConnectAgentSecure', host, port, authToken, caFile, serverName);
 }
 
 export async function disconnectAgent(agentId: string) {
@@ -88,6 +100,22 @@ export async function transferFile(agentId: string, remotePath: string, localPat
 	return callBinding('TransferFile', agentId, remotePath, localPath);
 }
 
+function callTransferBinding(name: string, ...args: unknown[]): Promise<unknown> {
+	const generatedBinding = App[name];
+	if (generatedBinding) return generatedBinding(...args);
+	const nativeBinding = (globalThis as { go?: { main?: { App?: Record<string, (...values: unknown[]) => Promise<unknown>> } } }).go?.main?.App?.[name];
+	if (nativeBinding) return nativeBinding(...args);
+	return Promise.reject(new Error(`Wails binding "${name}" not available`));
+}
+
+export async function downloadFile(agentId: string, remotePath: string) {
+	return callTransferBinding('DownloadFile', agentId, remotePath);
+}
+
+export async function uploadFile(agentId: string, remoteDirectory: string) {
+	return callTransferBinding('UploadFile', agentId, remoteDirectory);
+}
+
 // --- Wake-on-LAN ---
 export async function wakeOnLAN(macAddr: string, broadcastIP: string = '255.255.255.255') {
 	return callBinding('WakeOnLAN', macAddr, broadcastIP);
@@ -99,7 +127,19 @@ export async function getSessions() {
 }
 
 export async function saveSession(host: string, port: number, name: string, authToken: string = '', secure: boolean = false) {
-	return callBinding('SaveSession', host, port, name, authToken, secure);
+	if (secure) return saveSessionSecure(host, port, name, authToken);
+	return callBinding('SaveSession', host, port, name, authToken);
+}
+
+export async function saveSessionSecure(
+	host: string,
+	port: number,
+	name: string,
+	authToken: string = '',
+	caFile: string = '',
+	serverName: string = '',
+) {
+	return callBinding('SaveSessionSecure', host, port, name, authToken, caFile, serverName);
 }
 
 export async function deleteSession(id: number) {

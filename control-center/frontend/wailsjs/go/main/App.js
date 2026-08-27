@@ -6,8 +6,12 @@ export function ChooseSavePath(arg1) {
   return window['go']['main']['App']['ChooseSavePath'](arg1);
 }
 
-export function ConnectAgent(arg1, arg2, arg3, arg4) {
-  return window['go']['main']['App']['ConnectAgent'](arg1, arg2, arg3, arg4);
+export function ConnectAgent(arg1, arg2, arg3) {
+	return window['go']['main']['App']['ConnectAgent'](arg1, arg2, arg3);
+}
+
+export function ConnectAgentSecure(arg1, arg2, arg3, arg4, arg5) {
+  return window['go']['main']['App']['ConnectAgentSecure'](arg1, arg2, arg3, arg4, arg5);
 }
 
 export function DeleteSession(arg1) {
@@ -16,6 +20,10 @@ export function DeleteSession(arg1) {
 
 export function DisconnectAgent(arg1) {
   return window['go']['main']['App']['DisconnectAgent'](arg1);
+}
+
+export function DownloadFile(arg1, arg2) {
+  return window['go']['main']['App']['DownloadFile'](arg1, arg2);
 }
 
 export function ExecCommand(arg1, arg2, arg3) {
@@ -62,12 +70,24 @@ export function SaveScript(arg1, arg2) {
   return window['go']['main']['App']['SaveScript'](arg1, arg2);
 }
 
-export function SaveSession(arg1, arg2, arg3, arg4, arg5) {
-  return window['go']['main']['App']['SaveSession'](arg1, arg2, arg3, arg4, arg5);
+export function SaveSession(arg1, arg2, arg3, arg4) {
+	return window['go']['main']['App']['SaveSession'](arg1, arg2, arg3, arg4);
+}
+
+export function SaveSessionSecure(arg1, arg2, arg3, arg4, arg5, arg6) {
+  return window['go']['main']['App']['SaveSessionSecure'](arg1, arg2, arg3, arg4, arg5, arg6);
 }
 
 export function TransferFile(arg1, arg2, arg3) {
   return window['go']['main']['App']['TransferFile'](arg1, arg2, arg3);
+}
+
+export function UploadFile(arg1, arg2) {
+  return window['go']['main']['App']['UploadFile'](arg1, arg2);
+}
+
+export function UploadFileFromPath(arg1, arg2, arg3) {
+  return window['go']['main']['App']['UploadFileFromPath'](arg1, arg2, arg3);
 }
 
 export function WakeOnLAN(arg1, arg2) {

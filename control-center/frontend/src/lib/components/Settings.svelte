@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { addNotification } from '../stores/ui';
 	import { wakeOnLAN, getSessions, saveSession, deleteSession } from '../utils/api';
+	import { getErrorMessage } from '../utils/format';
 	import type { Session } from '../stores/agents';
 	import Icon from './Icon.svelte';
 
@@ -12,23 +13,34 @@
 	let newSessionPort = $state(9474);
 	let newSessionName = $state('');
 	let newSessionToken = $state('');
-let newSessionSecure = $state(false);
+	let newSessionSecure = $state(false);
+	let sessionsError = $state<string | null>(null);
 
 	$effect(() => { loadSessions(); });
 
-	async function loadSessions() { try { sessionsList = (await getSessions()) as Session[]; } catch {} }
+	async function loadSessions() {
+		try {
+			sessionsList = (await getSessions()) as Session[];
+			sessionsError = null;
+			return true;
+		} catch (err) {
+			sessionsError = getErrorMessage(err);
+			addNotification('error', `Failed to load sessions: ${sessionsError}`);
+			return false;
+		}
+	}
 
 	async function sendWoL() {
 		if (!wolMac.trim()) { addNotification('warning', 'Enter a MAC address'); return; }
 		wolSending = true;
 		try { await wakeOnLAN(wolMac, wolBroadcast); addNotification('success', `WoL sent to ${wolMac}`); }
-		catch (err: any) { addNotification('error', `WoL failed: ${err.message || err}`); }
+		catch (err) { addNotification('error', `WoL failed: ${getErrorMessage(err)}`); }
 		finally { wolSending = false; }
 	}
 
 	async function removeSession(id: number) {
 		try { await deleteSession(id); await loadSessions(); addNotification('success', 'Session deleted'); }
-		catch (err: any) { addNotification('error', `Delete failed: ${err.message || err}`); }
+		catch (err) { addNotification('error', `Delete failed: ${getErrorMessage(err)}`); }
 	}
 
 	async function addSession() {
@@ -41,7 +53,7 @@ let newSessionSecure = $state(false);
 			newSessionSecure = false;
 			addNotification('success', 'Session saved');
 		}
-		catch (err: any) { addNotification('error', `Save failed: ${err.message || err}`); }
+		catch (err) { addNotification('error', `Save failed: ${getErrorMessage(err)}`); }
 	}
 </script>
 
@@ -54,8 +66,8 @@ let newSessionSecure = $state(false);
 		</h3>
 		<p class="text-sm text-slate-500 mb-3">Send magic packet to wake up a sleeping machine</p>
 		<div class="flex gap-2 items-end flex-wrap">
-			<input type="text" bind:value={wolMac} placeholder="MAC (AA:BB:CC:DD:EE:FF)" class="bg-slate-700 text-slate-200 rounded-lg px-3 py-2 text-sm outline-none border border-slate-600 focus:border-cyan-500" />
-			<input type="text" bind:value={wolBroadcast} placeholder="Broadcast IP" class="bg-slate-700 text-slate-200 rounded-lg px-3 py-2 text-sm outline-none border border-slate-600 focus:border-cyan-500 w-40" />
+			<input type="text" bind:value={wolMac} aria-label="Wake-on-LAN MAC address" placeholder="MAC (AA:BB:CC:DD:EE:FF)" class="bg-slate-700 text-slate-200 rounded-lg px-3 py-2 text-sm outline-none border border-slate-600 focus:border-cyan-500" />
+			<input type="text" bind:value={wolBroadcast} aria-label="Wake-on-LAN broadcast IP" placeholder="Broadcast IP" class="bg-slate-700 text-slate-200 rounded-lg px-3 py-2 text-sm outline-none border border-slate-600 focus:border-cyan-500 w-40" />
 			<button class="px-4 py-2 rounded-lg text-sm font-medium bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white disabled:opacity-50 cursor-pointer border-none shadow-lg shadow-cyan-500/10" onclick={sendWoL} disabled={wolSending}>{wolSending ? 'Sending...' : 'Send Magic Packet'}</button>
 		</div>
 	</section>
@@ -66,22 +78,26 @@ let newSessionSecure = $state(false);
 		</h3>
 		<p class="text-sm text-slate-500 mb-3">Manage saved agent connections</p>
 		<div class="flex gap-2 items-end flex-wrap mb-3">
-			<input type="text" bind:value={newSessionHost} placeholder="Host IP" class="bg-slate-700 text-slate-200 rounded-lg px-3 py-2 text-sm outline-none border border-slate-600 focus:border-cyan-500" />
-			<input type="number" bind:value={newSessionPort} class="bg-slate-700 text-slate-200 rounded-lg px-3 py-2 text-sm outline-none border border-slate-600 focus:border-cyan-500 w-24" />
-			<input type="text" bind:value={newSessionName} placeholder="Name" class="bg-slate-700 text-slate-200 rounded-lg px-3 py-2 text-sm outline-none border border-slate-600 focus:border-cyan-500" />
-			<input type="password" bind:value={newSessionToken} placeholder="Auth token" class="bg-slate-700 text-slate-200 rounded-lg px-3 py-2 text-sm outline-none border border-slate-600 focus:border-cyan-500" />
+			<input type="text" bind:value={newSessionHost} aria-label="Session host IP" placeholder="Host IP" class="bg-slate-700 text-slate-200 rounded-lg px-3 py-2 text-sm outline-none border border-slate-600 focus:border-cyan-500" />
+			<input type="number" bind:value={newSessionPort} aria-label="Session port" class="bg-slate-700 text-slate-200 rounded-lg px-3 py-2 text-sm outline-none border border-slate-600 focus:border-cyan-500 w-24" />
+			<input type="text" bind:value={newSessionName} aria-label="Session name" placeholder="Name" class="bg-slate-700 text-slate-200 rounded-lg px-3 py-2 text-sm outline-none border border-slate-600 focus:border-cyan-500" />
+			<input type="password" bind:value={newSessionToken} aria-label="Session auth token" placeholder="Auth token" class="bg-slate-700 text-slate-200 rounded-lg px-3 py-2 text-sm outline-none border border-slate-600 focus:border-cyan-500" />
 			<label class="flex items-center gap-2 text-sm text-slate-300 pb-2"><input type="checkbox" bind:checked={newSessionSecure} /> TLS</label>
 			<button class="px-4 py-2 rounded-lg text-sm font-medium bg-slate-700 hover:bg-slate-600 text-slate-100 cursor-pointer border-none" onclick={addSession}>Save</button>
 		</div>
 
-		{#if sessionsList.length > 0}
+		{#if sessionsError}
+			<div class="px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/30 text-sm text-red-300" role="alert">
+				Could not load saved sessions: {sessionsError}
+			</div>
+		{:else if sessionsList.length > 0}
 			<div class="space-y-1">
 				{#each sessionsList as session (session.id)}
 					<div class="flex items-center gap-3 px-3 py-2 rounded-lg bg-slate-800/50 text-sm">
 						<span class="flex-1 text-slate-200 font-medium">{session.name}</span>
 						<span class="text-slate-400 font-mono">{session.host}:{session.port}</span><span class="text-xs text-cyan-400">{session.secure ? 'TLS' : 'LAN'}</span>
 						<span class="text-xs text-slate-500">{new Date(session.last_connected).toLocaleDateString()}</span>
-						<button class="text-slate-500 hover:text-red-400 transition-colors bg-transparent border-none cursor-pointer p-1 rounded hover:bg-slate-700" onclick={() => removeSession(session.id)}>
+						<button aria-label={`Delete session ${session.name}`} class="text-slate-500 hover:text-red-400 transition-colors bg-transparent border-none cursor-pointer p-1 rounded hover:bg-slate-700" onclick={() => removeSession(session.id)}>
 							<Icon name="x" size={13} />
 						</button>
 					</div>
