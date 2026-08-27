@@ -1,133 +1,121 @@
 # Testing Patterns
 
 **Analysis Date:** 2026-08-27
+<!-- refreshed: 2026-08-27 (post-merge of origin/main PR #1) -->
+
+The previous version of this document reflected `main` before it was synced with `origin/main`, where only one test file (`agent/internal/ui/probe_test.go`) existed. After merging PR #1 (commit `7f826c6`), the project has real test suites across both Go modules and the frontend, plus a CI workflow that runs them. Verified green locally on 2026-08-27 (see `CONCERNS.md`).
 
 ## Test Framework
 
-**Runner:**
-- Go standard library `testing` package. No third-party test framework (no testify, no ginkgo) is used or imported.
-- No test config file exists beyond the standard `go test` toolchain (`agent/go.mod`).
+**Go:**
+- Still the standard library `testing` package — no third-party framework (no testify/ginkgo) was introduced by the merge. Assertions remain plain `if got != want { t.Fatalf(...) }`.
+- `httptest.NewTLSServer` / `httptest.NewServer` + `gorilla/websocket` are used to spin up real WebSocket servers in tests (see `control-center/backend/client/client_test.go`, `agent/internal/server/handlers_test.go`) rather than mocking the transport — the established pattern is integration-style tests against a real (local, in-process) WebSocket connection.
 
-**Assertion Library:**
-- None — plain `if got != want { t.Fatalf(...) }` style assertions, standard Go idiom.
+**Frontend:**
+- Vitest (`vitest run` via `npm test`), added by the merge. Config lives in `control-center/frontend/vite.config.ts` (`test` block) — no separate `vitest.config.ts`.
+- No component-testing library (`@testing-library/svelte` etc.) yet — only plain-function unit tests via `describe`/`it`/`expect` from `vitest`.
 
 **Run Commands:**
 ```bash
-cd agent && go test ./...              # Run all agent tests
-cd agent && go test ./internal/ui/...  # Run only the ui package tests
-cd agent && go test -v ./...           # Verbose output
-```
-There is no `go test` invocation configured for `control-center/backend` — it currently has zero test files.
+# Go — from each module root
+cd agent && go test ./... -count=1
+cd agent && go test -race ./...
+cd agent && go vet ./...
 
-**Frontend:**
-- No test runner configured in `control-center/frontend/package.json` (no vitest, jest, or `@testing-library` dependency). No `*.test.ts`/`*.spec.ts` files exist anywhere under `control-center/frontend/src`.
+cd control-center && go test ./... -count=1
+cd control-center && go test -race ./...
+cd control-center && go vet ./...
+
+# Frontend
+cd control-center/frontend && npm ci
+cd control-center/frontend && npm test        # vitest run
+cd control-center/frontend && npm run check   # svelte-check
+cd control-center/frontend && npm run build   # vite build
+```
+This is exactly what `.github/workflows/ci.yml` runs (Go job is a matrix over `agent`/`control-center` on `windows-latest`; frontend job on `ubuntu-latest`).
 
 ## Test File Organization
 
-**Location:**
-- Co-located with source: `agent/internal/ui/probe_test.go` sits next to `agent/internal/ui/probe.go`, `probe_windows.go`, `probe_other.go`.
+**Location:** Co-located with source, standard Go/Vitest convention (`<file>_test.go`, `<file>.test.ts`).
 
-**Naming:**
-- Standard Go convention: `<file>_test.go`, package matches the file under test (`package ui`).
-
-**Structure:**
+**New test files added by the merge:**
 ```
 agent/
-└── internal/
-    └── ui/
-        ├── probe.go
-        ├── probe_windows.go
-        ├── probe_other.go
-        └── probe_test.go   # only test file in the entire repo
+├── cmd/lan-agent/main_test.go            # flag parsing / validateAgentFlags
+├── internal/filesystem/fs_test.go        # safePath, chunked read/write, checksums
+├── internal/server/handlers_test.go      # message dispatch, file transfer handlers
+└── internal/server/server_test.go        # connection lifecycle, auth handshake
+
+control-center/
+├── app_connection_test.go                # ConnectAgent / disconnect bindings
+├── app_dialog_test.go                    # native dialog bindings
+└── backend/
+    ├── audit/audit_test.go
+    ├── client/client_test.go             # reconnect, TLS greeting, pending requests
+    ├── securestore/securestore_test.go
+    ├── session/session_test.go           # SQLite persistence + token protect/restore
+    └── transfer/transfer_test.go         # new transfer package
+
+control-center/frontend/src/lib/utils/
+├── selectionState.test.ts
+└── transferState.test.ts
 ```
+
+Still no test file for: `agent/internal/{executor,discovery,screenshot,system}/`, `control-center/backend/{discovery,protocol,scripting,wol}/`, and any `.svelte` component.
 
 ## Test Structure
 
-**Suite Organization:**
-```go
-// agent/internal/ui/probe_test.go
-func TestAvailableWithDisplaySet(t *testing.T) {
-	t.Setenv("DISPLAY", ":0")
-	if !Available() {
-		t.Fatal("Available() = false with DISPLAY set, want true")
-	}
-}
+**Go patterns observed in the new suites:**
+- Table-driven tests are still not the dominant style — most new tests are one `TestXxx` function per behavior/scenario with a descriptive name (e.g. `TestSendFileUsesRemoteTemporaryPathAndCommitsValidatedFinalChunk` in `agent/internal/server/handlers_test.go`), following existing repo convention from `probe_test.go`.
+- `t.Helper()` + small local helper functions (e.g. `sendFileMessage`, `handlerChecksum` in `handlers_test.go`; `tlsGreetingServer` in `client_test.go`) are used to build reusable test fixtures inline rather than a separate fixtures package.
+- `t.Cleanup(...)` is the standard teardown mechanism (e.g. `t.Cleanup(server.Close)`), consistent with `t.Setenv` usage already established in `probe_test.go`.
 
-func TestAvailableHeadless(t *testing.T) {
-	t.Setenv("DISPLAY", "")
-	t.Setenv("WAYLAND_DISPLAY", "")
-	got := Available()
-	want := runtime.GOOS == "windows"
-	if got != want {
-		t.Fatalf("Available() = %v on %s without display, want %v", got, runtime.GOOS, want)
-	}
-}
+**Frontend pattern (Vitest):**
+```ts
+import { describe, expect, it } from 'vitest';
+import { clearSelectionAfterDisconnect } from './selectionState';
+
+describe('clearSelectionAfterDisconnect', () => {
+	it('clears the selected agent when that agent disconnects', () => {
+		expect(clearSelectionAfterDisconnect('agent-1', 'agent-1')).toBeNull();
+	});
+});
 ```
-
-**Patterns:**
-- One `TestXxx` function per behavior/scenario rather than table-driven tests (only 2 test functions exist total, so no table-driven convention has been established yet — table-driven tests using `[]struct{ name string; ... }` + `t.Run(tt.name, ...)` are the idiomatic Go approach and should be introduced for new multi-case tests).
-- `t.Setenv(...)` used to isolate environment-dependent behavior instead of manual save/restore — this is the established pattern for any test needing to control env vars (auto-restored by the testing framework after each test).
-- Failure messages follow the `got X, want Y` convention (`t.Fatalf("Available() = %v ..., want %v", got, want)`).
+Standard `describe`/`it`/`expect` blocks, one behavior per `it`. No component rendering yet — only pure-function utilities (`selectionState.ts`, `transferState.ts`) are tested this way.
 
 ## Mocking
 
-**Framework:** None present.
+**Go:** Still no mocking framework. The new tests favor **real dependencies over mocks**:
+- WebSocket tests spin up an actual `httptest` server + `gorilla/websocket` connection rather than mocking `*websocket.Conn`.
+- `securestore_test.go` presumably exercises the real DPAPI path on Windows (via `securestore.Default()`) and/or a test-only `Store` implementation — check this file directly before assuming behavior on non-Windows CI runners (the CI Go job runs on `windows-latest`, so DPAPI is exercised in CI).
+- `session_test.go` uses a real (temp-file or in-memory) SQLite database via `modernc.org/sqlite`, not a mock DB layer.
 
-**Patterns:**
-- No mocking library or hand-rolled mock/stub exists anywhere in the codebase (no `mock`, `fake`, `stub` identifiers found in Go or TS sources).
-- The `client.Manager` in `control-center/backend/client/client.go` and the `executor.Execute` function in `agent/internal/executor/executor.go` are the two most test-relevant units but have no tests; both are pure/testable via dependency injection of a `net/url`/`websocket.Dialer` or `os/exec.Command` boundary if tests are added later.
-
-**What to Mock (recommended, not yet implemented):**
-- WebSocket connections in `client.Manager.Connect`/`handshake` — would need an interface around `*websocket.Conn` to allow substituting a fake conn in unit tests.
-- `os/exec.Command` invocations in `agent/internal/executor/executor.go` — currently calls `exec.CommandContext` directly with no seam for substitution; introducing a `execCommand` function variable would enable testing `Execute` without spawning real shells.
-
-**What NOT to Mock:**
-- Simple pure functions like `detectShell` (`agent/internal/executor/executor.go:74`) — directly unit-testable without mocking since they take primitives and return primitives.
-
-## Fixtures and Factories
-
-**Test Data:**
-- None exist. No fixtures directory, no factory functions, no golden files.
-
-**Location:**
-- Not applicable — no fixtures directory present.
+**Frontend:** No mocking — pure functions tested directly.
 
 ## Coverage
 
-**Requirements:** None enforced. No coverage threshold, CI gate, or `go tool cover` invocation found in any script (`scripts/build-agent.ps1`, `scripts/build-all.ps1` only build; they do not run tests).
+**Requirements:** Still no enforced coverage threshold or `go tool cover` gate in CI — `.github/workflows/ci.yml` runs `go test`, `go test -race`, and `go vet`, not `go test -cover` with a minimum.
 
 **View Coverage:**
 ```bash
-cd agent && go test -cover ./...
 cd agent && go test -coverprofile=coverage.out ./... && go tool cover -html=coverage.out
+cd control-center && go test -coverprofile=coverage.out ./... && go tool cover -html=coverage.out
 ```
 
-## Test Types
+## CI Pipeline
 
-**Unit Tests:**
-- Only unit-level tests exist, and only for `agent/internal/ui` (display-availability probing). Scope: single-function behavior under different env-var states, cross-platform via `runtime.GOOS` branching.
+`.github/workflows/ci.yml` (added by the merge):
+- Triggers: push to `main`/`fix/**`, all pull requests, manual `workflow_dispatch`.
+- `go` job: matrix over `{agent, control-center}`, runs on `windows-latest` (matches production target OS). For `control-center`, builds the embedded frontend first (`npm ci && npm run build`) since `main.go` uses `//go:embed all:frontend/dist`. Then `go test ./... -count=1`, `go test -race ./...`, `go vet ./...`.
+- `frontend` job: runs on `ubuntu-latest`. `npm ci`, `npm test`, then type/Svelte checks (`npm run check`), consistent with local verification.
 
-**Integration Tests:**
-- None. The WebSocket protocol between agent (`agent/internal/server`) and control-center (`control-center/backend/client`) has no integration test exercising a real handshake/message round trip, despite being the most complex and stateful part of the system (reconnect logic, pending-request tracking, heartbeat).
+## Gaps Summary (priority order, post-merge)
 
-**E2E Tests:**
-- Not used. No Playwright/Cypress/Wails e2e harness configured for the Svelte + Wails desktop UI.
-
-## Common Patterns
-
-**Async Testing:**
-Not applicable — no async Go tests (no goroutine/channel testing patterns) and no frontend async tests exist yet. If added for `client.Manager.SendRequest` (channel + timer based), follow Go's standard pattern of using `context.WithTimeout` in the test itself to bound `t.Fatal` on hangs.
-
-**Error Testing:**
-Not applicable — no test currently asserts on an error path (e.g. `ErrAuthRequired`, malformed JSON payloads in `handlers.go`). These are natural first candidates: `agent/internal/server/handlers.go` handlers all short-circuit to `c.sendError(...)` on invalid JSON, which is currently unverified by any test.
-
-## Gaps Summary (highest priority first)
-
-1. `control-center/backend/client/client.go` — connection/handshake/reconnect logic is entirely untested; highest risk given its concurrency (goroutines, mutexes, channels).
-2. `agent/internal/server/handlers.go` — message dispatch and per-type payload validation untested; a `handleMessage` table-driven test over all `MsgXxx` types would catch protocol drift.
-3. `agent/internal/executor/executor.go` — `Execute`, `detectShell`, `cappedWriter` are pure enough to unit test cheaply (especially `cappedWriter.Write` truncation logic) but have zero coverage.
-4. `control-center/frontend` — zero test infrastructure; no vitest/testing-library installed. Adding tests requires first installing a test runner and updating `package.json` scripts.
+1. `agent/internal/executor/executor.go` — still zero coverage; highest-value remaining gap (the RCE-capable code path).
+2. `control-center/backend/scripting/engine.go` — `processVariables()` template substitution untested, including edge cases with shell-metacharacter-bearing variable values.
+3. `agent/internal/discovery/`, `control-center/backend/discovery/` — mDNS, both sides untested (lower risk, LAN-local only).
+4. Svelte components (`Dashboard`, `Terminal`, `FileBrowser`, `MultiExec`, `ScriptEditor`, etc.) — no component-level tests; only two utility modules (`selectionState`, `transferState`) have coverage so far.
 
 ---
 
-*Testing analysis: 2026-08-27*
+*Testing analysis: 2026-08-27 (post-merge refresh)*

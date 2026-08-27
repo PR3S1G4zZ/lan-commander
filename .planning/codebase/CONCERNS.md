@@ -1,149 +1,83 @@
 # Codebase Concerns
 
 **Analysis Date:** 2026-08-27
+<!-- refreshed: 2026-08-27 (post-merge of origin/main PR #1 + local security hardening) -->
 
-## Testing Readiness: NOT READY
+## Testing Readiness: READY (with residual gaps noted below)
 
-This project is **not ready to enter a formal testing phase**. There is effectively zero automated test coverage, no CI pipeline, and a documented verification ledger that does not match the actual repository state.
+The picture in the previous version of this document (based on the `main` branch before it was synced with `origin/main`) was stale. `main` was 2 commits behind `origin/main`, missing an already-merged PR (`#1`, commits `6d78226` + `2b57b4d`) that added a full test suite, CI, and several security fixes. After merging (`7f826c6`) and applying two follow-up fixes locally (`7054264`, `4d30c29`), the project has been verified end-to-end on this machine:
 
-**What's missing:**
-- No CI configuration anywhere in the repo (no `.github/workflows`, no `.gitlab-ci.yml`, no Azure Pipelines, nothing). `find . -path "*/.github/*"` and `find . -iname "*.yml"` both return empty.
-- Only one Go test file in the entire codebase: `agent/internal/ui/probe_test.go` (23 lines). Every other Go package — `agent/internal/server/`, `agent/internal/executor/`, `agent/internal/filesystem/`, `agent/internal/discovery/`, `agent/internal/system/`, `control-center/backend/client/`, `control-center/backend/session/`, `control-center/backend/audit/`, `control-center/backend/scripting/`, `control-center/backend/discovery/`, `control-center/backend/wol/`, `control-center/app.go` — has **no tests**.
-- The frontend (`control-center/frontend/`) has **zero test files** (no `*.test.ts`, no `*.spec.ts`) and no `test` script in `control-center/frontend/package.json` (scripts are only `dev`, `build`, `preview`, `check`). There is no Vitest/Jest config file present.
-- No `.eslintrc*`, `.prettierrc*`, or `biome.json` found in `control-center/frontend/` — no enforced lint/format standard beyond `svelte-check`.
+```
+agent:            go test ./... -count=1   PASS
+                  go test -race ./...      PASS
+                  go vet ./...             clean
+control-center:   go test ./... -count=1   PASS
+                  go test -race ./...      PASS
+                  go vet ./...             clean
+frontend:         npm test (5 tests)       PASS
+                  npm run check             0 errors, 0 warnings
+                  npm run build             succeeds
+```
 
-**Documentation/reality mismatch (high priority to investigate):**
-`.superpowers/sdd/lan-commander-completion/progress.md` claims a "Final verification evidence" section stating:
-- `go test ./...`, `go test -race ./...`, `go vet ./...` pass for both `agent` and `control-center`
-- `npm test` (5 tests), `npm run check`, `npm run build` pass for the frontend
-- A `securestore` package handles TLS/DPAPI credential storage
-- A release manifest with five SHA-256-verified artifacts was generated
+This is a real green baseline (run locally, not just claimed) — the project can enter a formal testing/UAT phase.
 
-None of this is true of the current working tree: there are no Go tests beyond `probe_test.go`, no `npm test` script exists, no `securestore` package exists anywhere in the repo (`find . -iname "*securestore*"` returns nothing), and `git log --diff-filter=D` shows no test files were ever deleted. This strongly suggests either (a) the ledger describes work done in a separate branch/worktree that was never merged, or (b) the ledger is aspirational/fabricated. **This must be reconciled before trusting any "verified" claims in project documentation.** Treat `progress.md` as unreliable until cross-checked against actual git history.
+**What now has coverage (previously zero):**
+- `agent/cmd/lan-agent/main_test.go`, `agent/internal/filesystem/fs_test.go`, `agent/internal/server/{handlers,server}_test.go`
+- `control-center/{app_connection,app_dialog}_test.go`, `backend/{audit,client,securestore,session,transfer}/*_test.go`
+- `control-center/frontend/src/lib/utils/{selectionState,transferState}.test.ts`
+- `.github/workflows/ci.yml` — matrix CI (Go tests + race + vet for `agent` and `control-center`, frontend `npm test`/`check`/build) on push/PR
 
-**Before entering a testing phase, prioritize:**
-1. Add unit tests for `agent/internal/executor/`, `agent/internal/filesystem/` (path safety), and `agent/internal/server/` auth handling — these are the highest-risk, security-relevant modules.
-2. Add a `test` script and at least smoke tests for `control-center/frontend/src/lib/stores/` and `control-center/frontend/src/lib/utils/`.
-3. Stand up a CI workflow (`go test ./...`, `go vet ./...`, `npm run check`, `npm run build`) so regressions are caught automatically — currently everything is manual.
-4. Reconcile `.superpowers/sdd/lan-commander-completion/progress.md` against reality; remove or correct false verification claims.
+**Still not covered (residual gaps, lower priority than before):**
+- `agent/internal/executor/`, `agent/internal/discovery/`, `agent/internal/system/`, `agent/internal/screenshot/` — no test files yet. `executor.Execute` remains the highest-value target here (timeout handling, output capping).
+- `control-center/backend/{discovery,protocol,scripting,wol}/` — no test files. `scripting/engine.go`'s `text/template` variable substitution is the most worth testing (see Security Considerations below).
+- Frontend: only `selectionState`/`transferState` utils are tested; the Svelte components themselves (`Dashboard`, `Terminal`, `FileBrowser`, etc.) have no component tests.
+
+**Documentation/reality mismatch: resolved.**
+The earlier version of this document flagged `.superpowers/sdd/lan-commander-completion/progress.md` as unreliable because it claimed tests/securestore/CI that didn't exist in the working tree. Root cause: that work existed on `origin/main` (PR #1) but had never been pulled into the local `main` checkout. After merging, `progress.md`'s claims check out against the actual code. No further reconciliation needed — treat that ledger as accurate again.
 
 ## Security Considerations
 
-**Unauthenticated agent access is the default:**
-- Risk: `agent/cmd/lan-agent/main.go` defaults `-auth-token` to `""`. In `agent/internal/server/handlers.go` (`handleMessage`), when `s.authToken == ""` the server marks every connecting client `authed = true` immediately (see `agent/internal/server/server.go:167-169`). Any device on the LAN (or routed network) that can reach the agent's WebSocket port can execute arbitrary shell commands, read/write arbitrary files, and capture screenshots with no credential at all.
-- Files: `agent/cmd/lan-agent/main.go`, `agent/internal/server/server.go`, `agent/internal/server/handlers.go`
-- Current mitigation: none by default; operator must explicitly pass `-auth-token`.
-- Recommendation: require a non-empty auth token by default (fail to start, or generate+print a random token on first run) rather than silently allowing unauthenticated access.
+**Resolved by the origin/main merge:**
+- **Unauthenticated agent access is no longer the default.** `agent/cmd/lan-agent/main.go` now requires `--auth-token` to start, unless `--no-auth` is passed explicitly (documented as "only for an isolated laboratory network"). Previously the agent defaulted to `authToken == ""`, which auto-authed every connecting client.
+- **Control-center now uses `wss://` when appropriate.** `control-center/backend/client/client.go` builds the WebSocket URL scheme dynamically instead of hardcoding `"ws"`.
+- **CORS/Origin check tightened.** `agent/internal/server/server.go`'s `CheckOrigin` now requires an empty `Origin` header (native clients don't send one; browsers always do), mitigating cross-site WebSocket hijacking (CSWSH).
+- **Auth tokens are no longer stored in plaintext on Windows.** `control-center/backend/session/session.go` now routes `AuthToken` through `control-center/backend/securestore` before persisting to SQLite; on Windows this uses `CryptProtectData`/`CryptUnprotectData` (DPAPI, user-scoped). On non-Windows platforms `securestore.Default()` returns an `unavailableStore` that errors (`ErrUnavailable`) rather than silently falling back to plaintext — a safe fail-closed choice, but it means saved sessions with tokens currently cannot be persisted on Linux/macOS control-center builds. Worth tracking as a follow-up if cross-platform session persistence matters.
 
-**Auth token comparison is not constant-time:**
-- Risk: `agent/internal/server/handlers.go:65` compares `auth.Token != c.server.authToken` using Go's native `!=` string comparison, which short-circuits on first differing byte. This is a timing side-channel that could theoretically help an attacker brute-force the token over many attempts, especially since there is no rate limiting on auth attempts.
-- Files: `agent/internal/server/handlers.go`
-- Recommendation: use `crypto/subtle.ConstantTimeCompare` and add a basic rate limiter / backoff on repeated failed auth attempts per connection/IP.
+**Fixed locally (this session, commit `7054264`):**
+- **Auth token comparison is now constant-time.** `agent/internal/server/handlers.go` uses `crypto/subtle.ConstantTimeCompare` instead of `!=`.
+- **Auth attempt limiting added.** `agent/internal/server/server.go` adds `MaxAuthAttempts = 5`; `Client.authAttempts` (atomic counter) closes the connection after 5 failed `auth` messages on a single WebSocket connection. This is per-connection, not per-IP — an attacker can still reconnect and retry, but each connection now costs a fresh TCP/WS handshake instead of allowing unlimited attempts on one socket.
 
-**Control-center never actually connects over TLS ("wss://"):**
-- Risk: The agent server supports TLS (`agent/internal/server/server.go` `createListener()` loads cert/key and can `tls.Listen`), but the control-center client (`control-center/backend/client/client.go:101-116` and the reconnect path around line 587-591) always builds the WebSocket URL with `Scheme: "ws"` — never `"wss"`. This means even when an operator configures TLS on the agent, the actual desktop client shipped in this repo has no code path that uses it. All traffic — including the auth token sent in the `auth` message and all command/file transfer payloads — travels as plaintext WebSocket frames on the LAN.
-- Files: `control-center/backend/client/client.go`, `agent/internal/server/server.go`
-- Recommendation: add a `useTLS`/`wss` option wired through `Connect()`, and use `tls.Config` (with certificate pinning or a user-approved fingerprint, since these are typically self-signed LAN certs) on the dialer.
+**Confirmed intentional, not a bug (product decision, 2026-08-27):**
+- **Filesystem access has no root confinement.** `agent/internal/filesystem/fs.go`'s `safePath()` only rejects `..` traversal; an authenticated client can still read/write anywhere the agent process's OS user can. This was raised and explicitly confirmed as intentional — LAN Commander is meant to be a full remote-administration tool (comparable to RDP/SSH+GUI), gated by the auth token, not a sandboxed file-sharing tool. No `--allowed-root` flag was added. Revisit only if the product direction changes.
 
-**Auth tokens stored in plaintext:**
-- Risk: `control-center/backend/session/session.go` persists `AuthToken` as a plain `TEXT` column in a local SQLite database (`lan-commander.db`) with no encryption. Anyone with filesystem access to the operator's machine (or a backup of it) can read every saved agent's credentials.
-- Files: `control-center/backend/session/session.go`
-- Recommendation: encrypt tokens at rest (e.g., OS keychain/DPAPI, or an app-level encryption key), especially since the `progress.md` ledger references a `securestore`/DPAPI mechanism that does not actually exist in the code.
-
-**Filesystem access has no root confinement:**
-- Risk: `agent/internal/filesystem/fs.go` `safePath()` only rejects paths containing `..` and cleans/absolutizes the path — it does not confine access to any allowed root directory. Once authenticated (or if auth is disabled, as above), a client can read/write/list any file the agent process's OS user can access anywhere on disk (e.g., `C:\Windows\System32\config`, SSH keys, browser profiles), not just an intended "shared" directory.
-- Files: `agent/internal/filesystem/fs.go`, `agent/internal/server/handlers.go` (`handleListDir`, `handleGetFile`, `handleSendFile`)
-- Recommendation: introduce a configurable allowed-roots list and reject paths outside it, in addition to the existing traversal check.
-
-**Arbitrary command execution via `executor.Execute`:**
-- Risk: `agent/internal/executor/executor.go` builds a full shell command line by joining `cmd` and `args` with spaces and passing the whole thing to `powershell -Command` / `cmd.exe /c` / `/bin/bash -c`. There is no allowlist, sandboxing, or restriction on what commands can run — by design this is a full remote-shell feature, but it means a compromised or malicious client (especially combined with the no-auth-by-default issue above) has unrestricted code execution on the host.
-- Files: `agent/internal/executor/executor.go`
-- Impact: this is core product functionality, not incidental, but it raises the stakes of the auth gaps above considerably — this is effectively an unauthenticated RCE service in default configuration.
-
-**CORS/Origin check disabled on WebSocket upgrade:**
-- Risk: `agent/internal/server/server.go:74-76` — `CheckOrigin: func(r *http.Request) bool { return true }` accepts WebSocket upgrades from any origin. Combined with the default no-auth-token setup, a malicious webpage loaded in a browser on the same LAN could open a WebSocket to the agent and issue commands (a CSWSH — cross-site WebSocket hijacking — style attack), since browsers do not block cross-origin WebSocket connections by default.
-- Files: `agent/internal/server/server.go`
-- Recommendation: validate `Origin` header or bind the WebSocket server to only accept connections initiated by the known control-center client (e.g., a custom header/handshake secret), not just any WebSocket-capable caller.
-
-**Script variable substitution uses `text/template` directly on shell input:**
-- Risk: `control-center/backend/scripting/engine.go` `processVariables()` parses the raw script line as a Go `text/template` and executes it with user-supplied `vars`. If a variable value itself contains `{{...}}` template syntax, or if the script content includes uncontrolled template actions, this could allow unexpected template execution/expansion before the string is handed to a shell. It's a `text/template` (not `html/template`), which has no escaping semantics appropriate for shell contexts, so this is really just string templating with a Turing-incomplete surface, but it's still worth validating/sanitizing variable values before injecting them into a command string ultimately passed to `bash -c` / `powershell -Command`.
-- Files: `control-center/backend/scripting/engine.go`
-- Recommendation: escape or reject variable values containing shell metacharacters before substitution, or move to a placeholder-based (non-template-engine) substitution to reduce surface area.
+**Still open (lower severity, not addressed this session):**
+- **`control-center/backend/scripting/engine.go`'s `processVariables()`** still parses script lines as raw `text/template` with user-supplied vars — no escaping of shell metacharacters before the result is handed to `bash -c`/`powershell -Command`. Low exploitability (requires the operator to already have exec access to the agent) but worth hardening if scripts are ever shared/imported from untrusted sources.
+- **`agent/internal/executor/executor.go`** remains an intentionally unrestricted remote-shell primitive (by design — this is the product's core feature) with no test coverage yet.
 
 ## Tech Debt
 
-**Duplicate/backup frontend source tree left in the repository:**
-- Issue: `control-center/frontend/src/lib/backup/` contains a full parallel copy of nearly every component in `control-center/frontend/src/lib/components/` (`App.svelte`, `AuditLog.svelte`, `ConnectionDialog.svelte`, `Dashboard.svelte`, `FileBrowser.svelte`, `MultiExec.svelte`, `Notifications.svelte`, `ScriptEditor.svelte`, `Settings.svelte`, `Sidebar.svelte`, `Terminal.svelte`, plus `agents.ts`, `api.ts`, `format.ts`, `sessions.ts`, `ui.ts`). It is unclear whether this is dead code, a rollback safety net, or an artifact of the delegated-agent workflow described in `progress.md`.
-- Files: `control-center/frontend/src/lib/backup/*`
-- Impact: doubles the frontend surface area for anyone reading the codebase, risks accidental imports from the wrong tree, and bloats the repo/diff noise.
-- Fix approach: delete `backup/` if it is confirmed superseded by `components/`, or move it out of the source tree (e.g., into a `docs/` reference or git history) if it must be retained for reference.
+**Resolved this session:**
+- `control-center/frontend/src/lib/backup/` (16 files, dead duplicate of `components/`/`stores/`/`utils/`) — deleted in commit `4d30c29`. Verified `npm run check`/`build`/`test` still pass with it removed.
+- Committed build binaries (`agent/build/lan-agent.exe`, `lan-agent-linux`) and `frontend/dist/` — already removed from tracking by the origin/main merge (`.gitignore` now covers `agent/build/`, `installers/windows/lan-agent.exe`, `installers/linux/lan-agent-linux`); confirmed via `git ls-files` that none remain tracked.
 
-**Build artifacts committed to the repository:**
-- Issue: `agent/build/lan-agent-linux` and `agent/build/lan-agent.exe` are compiled binaries checked directly into version control, alongside `control-center/frontend/dist/` build output (`App-*.js`, `index-*.js`, `index-*.css`).
-- Files: `agent/build/lan-agent-linux`, `agent/build/lan-agent.exe`, `control-center/frontend/dist/assets/*`
-- Impact: bloats repo size over time, risks stale/mismatched binaries being mistaken for current builds, and complicates diffing.
-- Fix approach: add these paths to `.gitignore` and rely on the release pipeline (`scripts/`) to produce them on demand.
-
-**No dependency lockfile verification / update process visible:**
-- Issue: `agent/go.sum` and `control-center/frontend/package-lock.json` exist, but there's no automated process (CI) that verifies `go.mod`/`go.sum` integrity or runs `npm audit` / `go list -m -u` to catch outdated or vulnerable dependencies.
-- Files: `agent/go.mod`, `agent/go.sum`, `control-center/go.mod`, `control-center/frontend/package.json`, `control-center/frontend/package-lock.json`
-- Fix approach: add a periodic dependency-audit step once CI is introduced.
-
-**In-memory audit log capped at 1000 entries with silent eviction:**
-- Issue: `control-center/backend/audit/audit.go` `Logger` keeps a ring buffer of at most `capacity` (default 1000) entries in memory; once exceeded, the oldest entries are silently dropped from the in-memory slice (though SQLite persistence via `OpenDB`/`dbEnabled` retains full history if enabled). If `OpenDB` is never called, audit history beyond the last 1000 actions is permanently lost with no warning to the operator.
-- Files: `control-center/backend/audit/audit.go`
-- Impact: a long-running session could silently lose early audit trail entries if DB persistence isn't explicitly wired up by the caller.
-- Fix approach: verify `control-center/app.go` always calls `OpenDB` on startup, or surface a UI warning when audit persistence is disabled.
-
-**No rate limiting or backpressure beyond fixed buffer sizes:**
-- Issue: `agent/internal/server/server.go` uses a fixed `send chan []byte, 64` per client (`Client.send`) and silently drops messages when full (`sendMsg`, "Send buffer full, dropping message"). There's no mechanism to detect or recover from a client that's falling behind other than silent data loss — a dropped `command_result` or `file_chunk` message could leave the control-center UI in an inconsistent state (e.g., a stuck "in progress" transfer) with no timeout/retry visible in `client.go`.
-- Files: `agent/internal/server/server.go`, `control-center/backend/client/client.go`
-- Impact: potential silent hangs in file transfers or command execution under load or on a congested LAN link.
-- Fix approach: add explicit timeout/retry handling on the control-center side for pending requests that never receive a final response, and consider surfacing dropped-message conditions back to the client instead of only logging server-side.
+**Still open:**
+- **No dependency audit process in CI.** `.github/workflows/ci.yml` runs tests/vet/build but not `npm audit` or `go list -m -u`. Add as a periodic/scheduled job if supply-chain hygiene becomes a priority.
+- **Protocol duplication.** The wire protocol is still defined independently in `agent/internal/protocol/types.go` and `control-center/backend/protocol/types.go` (no shared Go module). Unchanged by the merge — still requires manual lockstep updates on both sides when the protocol changes.
+- **In-memory audit log ring buffer (1000 entries)** in `control-center/backend/audit/audit.go` still silently evicts beyond capacity if SQLite persistence isn't wired up. Unchanged by the merge; verify `App.startup` always calls `OpenDB` if this matters.
 
 ## Fragile Areas
 
-**`control-center/app.go` (804 lines) is a large, monolithic Wails binding surface:**
-- Files: `control-center/app.go`
-- Why fragile: as the single Go↔frontend bridge, this file likely aggregates session, client, audit, scripting, and WoL orchestration in one place (largest Go file in the project by a wide margin — next largest is `client.go` at 622 lines). Changes here have a wide blast radius across the entire UI.
-- Safe modification: read the full file before editing; consider decomposing into per-domain binding files (session bindings, transfer bindings, script bindings) if it continues to grow.
-- Test coverage: none — this file has zero associated tests, so regressions here are only caught by manual UAT.
+**`control-center/app.go` (~1000+ lines after the merge, was 804):** Still the single Wails binding surface aggregating session, client, audit, scripting, transfer, and WoL orchestration. Now has `app_connection_test.go` and `app_dialog_test.go` covering connection/dialog flows specifically, but the file as a whole remains a wide-blast-radius change point. Read fully before editing.
 
-**`control-center/backend/client/client.go` (622 lines) manages all agent WebSocket lifecycle, reconnection, and pending-request tracking:**
-- Files: `control-center/backend/client/client.go`
-- Why fragile: implements manual reconnect logic (`maxReconnectRetries`, `reconnectDelay`) and a pending-request map (`pendingMu`, `pending`) with per-request timers — this kind of hand-rolled concurrent state machine is a common source of goroutine leaks, deadlocks, or races, and it has zero automated race-detector coverage (`go test -race` is claimed in `progress.md` but no test files exist to run it against).
-- Safe modification: add tests before modifying reconnect/timeout logic; run `go run -race` manually against real agent connections when touching this file until real tests exist.
+**`control-center/backend/client/client.go` (601 lines, was 622 — refactored during the merge):** Connection lifecycle, reconnect, and pending-request tracking. Now has `client_test.go` (170 lines) covering this — a meaningful improvement over the previous zero-coverage state, but still the most concurrency-sensitive file in the project; extend tests before modifying reconnect/timeout logic further.
 
-## Missing Critical Features / Gaps
+## Test Coverage Gaps (priority order, post-merge)
 
-**No CI/CD automation of any kind:**
-- Problem: every verification step (build, test, lint) described in `progress.md` is manual and unverifiable from the repository alone. There's no `.github/workflows`, no pre-commit hook config, nothing that runs on push/PR.
-- Blocks: confident iteration — every change currently relies entirely on the developer remembering to run `go build`, `go vet`, `npm run check`, and `npm run build` locally before committing.
-
-**No `.gitignore` coverage for build outputs (partially):**
-- Problem: despite a `.gitignore` at the repo root and one in `control-center/.gitignore`, compiled binaries (`agent/build/lan-agent.exe`, `agent/build/lan-agent-linux`) and frontend `dist/` output are present in the tracked tree (see Tech Debt above).
-- Blocks: clean diffs and accurate size tracking of the actual source contribution.
-
-## Test Coverage Gaps
-
-**Agent core (all untested):**
-- What's not tested: `agent/internal/executor/` (command execution, timeout enforcement, output capping), `agent/internal/filesystem/` (path safety/traversal protection — the single most security-critical function, `safePath()`), `agent/internal/server/` (auth handshake, message routing, WebSocket lifecycle), `agent/internal/discovery/` (mDNS advertisement), `agent/internal/system/` (system info monitoring).
-- Files: `agent/internal/executor/executor.go`, `agent/internal/filesystem/fs.go`, `agent/internal/server/server.go`, `agent/internal/server/handlers.go`, `agent/internal/discovery/mdns.go`, `agent/internal/system/monitor.go`
-- Risk: these modules mediate remote code execution and filesystem access — the highest-impact code in the project — with zero regression protection.
-- Priority: High
-
-**Control-center backend (all untested):**
-- What's not tested: `control-center/backend/client/client.go` (connection/reconnect/pending-request logic), `control-center/backend/session/session.go` (SQLite persistence), `control-center/backend/audit/audit.go` (ring buffer + DB dual-write), `control-center/backend/scripting/engine.go` (variable templating, script execution loop), `control-center/backend/discovery/discover.go` (mDNS parsing), `control-center/backend/wol/wol.go` (Wake-on-LAN packet construction), `control-center/app.go` (Wails bindings).
-- Files: entire `control-center/backend/` tree and `control-center/app.go`
-- Risk: session/audit persistence bugs would be silent (SQLite errors are only logged, not surfaced), and scripting engine bugs could produce unexpected shell commands.
-- Priority: High
-
-**Frontend (entirely untested):**
-- What's not tested: all Svelte components and stores in `control-center/frontend/src/lib/components/` and `control-center/frontend/src/lib/stores/` — no unit or component tests exist, and no test runner is configured.
-- Files: `control-center/frontend/src/lib/**`
-- Risk: UI regressions (e.g., broken file transfer progress, script editor state) would only be caught by manual clicking.
-- Priority: Medium (lower than backend RCE/filesystem paths, but still a gap before any "testing phase" claim is credible)
+1. `agent/internal/executor/executor.go` — `Execute`, `detectShell`, `cappedWriter` are cheap to unit test (pure-ish functions) and remain uncovered; highest-value remaining gap given this is the RCE-capable code path.
+2. `control-center/backend/scripting/engine.go` — `processVariables()` template substitution has no test exercising malicious/edge-case variable values.
+3. `agent/internal/discovery/`, `control-center/backend/discovery/` — mDNS advertisement/discovery, both sides untested; lower risk (LAN-local, no remote-write surface).
+4. Frontend Svelte components — no component-level tests yet, only `selectionState`/`transferState` utils. Lower priority than backend gaps given current CI already gates `npm run check` (type safety) and `npm run build`.
 
 ---
 
-*Concerns audit: 2026-08-27*
+*Concerns audit: 2026-08-27 (post-merge refresh)*
