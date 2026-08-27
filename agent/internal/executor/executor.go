@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -53,10 +54,10 @@ func Execute(cmd string, args []string, timeout int, shell string) (protocol.Com
 
 	exitCode := 0
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
-		} else if ctx.Err() == context.DeadlineExceeded {
+		if ctx.Err() == context.DeadlineExceeded {
 			exitCode = -1 // timeout
+		} else if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
 		} else {
 			exitCode = -2 // execution error
 		}
@@ -97,16 +98,23 @@ type cappedWriter struct {
 }
 
 func (c *cappedWriter) Write(p []byte) (int, error) {
+	originalLen := len(p)
 	remaining := c.limit - c.total
 	if remaining <= 0 {
-		return len(p), nil // silently drop
+		return originalLen, nil // silently drop
 	}
 	if len(p) > remaining {
 		p = p[:remaining]
 	}
 	n, err := c.w.Write(p)
 	c.total += n
-	return len(p), err // report original length to caller
+	if err != nil {
+		return n, err
+	}
+	if n != len(p) {
+		return n, io.ErrShortWrite
+	}
+	return originalLen, nil // report original length, including discarded bytes
 }
 
 // ValidateShell checks if the requested shell is available.

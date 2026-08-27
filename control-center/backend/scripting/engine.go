@@ -32,12 +32,12 @@ type ExecutionResult struct {
 
 // ScriptResult holds the complete result of script execution.
 type ScriptResult struct {
-	ScriptName   string             `json:"script_name"`
-	AgentID      string             `json:"agent_id"`
-	Results      []ExecutionResult  `json:"results"`
-	TotalLines   int                `json:"total_lines"`
-	SuccessCount int                `json:"success_count"`
-	FailedCount  int                `json:"failed_count"`
+	ScriptName   string            `json:"script_name"`
+	AgentID      string            `json:"agent_id"`
+	Results      []ExecutionResult `json:"results"`
+	TotalLines   int               `json:"total_lines"`
+	SuccessCount int               `json:"success_count"`
+	FailedCount  int               `json:"failed_count"`
 }
 
 // Engine manages scripts and can execute them on agents.
@@ -78,8 +78,8 @@ func NewEngineWithPath(path string) *Engine {
 
 // Save stores a script both in memory and on disk.
 func (e *Engine) Save(name string, content string) error {
-	if strings.TrimSpace(name) == "" {
-		return fmt.Errorf("script name cannot be empty")
+	if err := validateScriptName(name); err != nil {
+		return err
 	}
 	if strings.TrimSpace(content) == "" {
 		return fmt.Errorf("script content cannot be empty")
@@ -136,6 +136,10 @@ func (e *Engine) List() []Script {
 
 // Delete removes a script by name.
 func (e *Engine) Delete(name string) error {
+	if err := validateScriptName(name); err != nil {
+		return err
+	}
+
 	e.mu.Lock()
 	_, exists := e.scripts[name]
 	if !exists {
@@ -165,7 +169,7 @@ func (e *Engine) Execute(script *Script, vars map[string]string, executor Comman
 		return nil, fmt.Errorf("command executor cannot be nil")
 	}
 
-	lines := strings.Split(strings.TrimSpace(script.Content), "\n")
+	lines := strings.Split(script.Content, "\n")
 	result := &ScriptResult{
 		ScriptName: script.Name,
 		Results:    make([]ExecutionResult, 0, len(lines)),
@@ -287,6 +291,10 @@ func (e *Engine) loadFromDisk() error {
 }
 
 func (e *Engine) saveToDisk(name string) error {
+	if err := validateScriptName(name); err != nil {
+		return err
+	}
+
 	// Ensure directory exists
 	if err := os.MkdirAll(e.basePath, 0755); err != nil {
 		return err
@@ -310,5 +318,19 @@ func (e *Engine) saveToDisk(name string) error {
 		return fmt.Errorf("failed to write script file: %w", err)
 	}
 
+	return nil
+}
+
+// validateScriptName ensures a script name cannot escape the scripts directory
+// when it is used to build a persistence path.
+func validateScriptName(name string) error {
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("script name cannot be empty")
+	}
+	if filepath.IsAbs(name) || filepath.VolumeName(name) != "" ||
+		strings.ContainsAny(name, `/\\`) || strings.ContainsRune(name, 0) ||
+		name == "." || name == ".." {
+		return fmt.Errorf("script name must be a simple file name")
+	}
 	return nil
 }

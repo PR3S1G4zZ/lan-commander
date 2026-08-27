@@ -19,40 +19,8 @@ import (
 
 const DefaultChunkSize = 64 * 1024
 
-const cancelFileMessage = "cancel_file"
-
 type Requester interface {
 	SendRequest(agentID string, msgType string, payload interface{}, timeout time.Duration) (*protocol.Message, error)
-}
-
-type getFilePayload struct {
-	Path      string `json:"path"`
-	Offset    int64  `json:"offset,omitempty"`
-	ChunkSize int    `json:"chunk_size,omitempty"`
-}
-
-type fileChunkPayload struct {
-	Path      string `json:"path"`
-	Data      []byte `json:"data"`
-	Offset    int64  `json:"offset"`
-	TotalSize int64  `json:"total_size,omitempty"`
-	Final     bool   `json:"final"`
-	Checksum  string `json:"checksum,omitempty"`
-}
-
-type sendFilePayload struct {
-	Path       string `json:"path"`
-	Data       []byte `json:"data,omitempty"`
-	Offset     int64  `json:"offset,omitempty"`
-	TotalSize  int64  `json:"total_size,omitempty"`
-	Final      bool   `json:"final,omitempty"`
-	Checksum   string `json:"checksum,omitempty"`
-	TransferID string `json:"transfer_id,omitempty"`
-}
-
-type cancelFilePayload struct {
-	Path       string `json:"path"`
-	TransferID string `json:"transfer_id"`
 }
 
 type fileAckPayload struct {
@@ -99,7 +67,7 @@ func Download(ctx context.Context, requester Requester, agentID, remotePath, loc
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("download cancelled: %w", err)
 		}
-		response, err := requester.SendRequest(agentID, protocol.MsgGetFile, getFilePayload{
+		response, err := requester.SendRequest(agentID, protocol.MsgGetFile, protocol.GetFilePayload{
 			Path:      remotePath,
 			Offset:    offset,
 			ChunkSize: DefaultChunkSize,
@@ -108,7 +76,7 @@ func Download(ctx context.Context, requester Requester, agentID, remotePath, loc
 			return fmt.Errorf("file transfer failed: %w", err)
 		}
 
-		var chunk fileChunkPayload
+		var chunk protocol.FileChunkPayload
 		if err := decodePayload(response, &chunk); err != nil {
 			return fmt.Errorf("invalid file chunk response: %w", err)
 		}
@@ -188,7 +156,7 @@ func Upload(ctx context.Context, requester Requester, agentID, localPath, remote
 	sentChunk := false
 	defer func() {
 		if err != nil && sentChunk {
-			_, _ = requester.SendRequest(agentID, cancelFileMessage, cancelFilePayload{
+			_, _ = requester.SendRequest(agentID, protocol.MsgCancelFile, protocol.CancelFilePayload{
 				Path:       remotePath,
 				TransferID: transferID,
 			}, timeout)
@@ -207,7 +175,7 @@ func Upload(ctx context.Context, requester Requester, agentID, localPath, remote
 				return fmt.Errorf("cannot checksum upload source: %w", err)
 			}
 			final := offset+int64(n) == totalSize
-			payload := sendFilePayload{
+			payload := protocol.SendFilePayload{
 				Path:       remotePath,
 				Data:       data,
 				Offset:     offset,
@@ -230,7 +198,7 @@ func Upload(ctx context.Context, requester Requester, agentID, localPath, remote
 		if readErr != nil {
 			if readErr == io.EOF {
 				if totalSize == 0 {
-					payload := sendFilePayload{
+					payload := protocol.SendFilePayload{
 						Path:       remotePath,
 						TotalSize:  0,
 						Final:      true,
@@ -247,7 +215,7 @@ func Upload(ctx context.Context, requester Requester, agentID, localPath, remote
 	}
 }
 
-func sendUploadChunk(ctx context.Context, requester Requester, agentID string, payload sendFilePayload, timeout time.Duration) error {
+func sendUploadChunk(ctx context.Context, requester Requester, agentID string, payload protocol.SendFilePayload, timeout time.Duration) error {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("upload cancelled: %w", err)
 	}
