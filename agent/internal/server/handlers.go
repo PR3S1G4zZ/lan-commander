@@ -25,7 +25,7 @@ func (c *Client) handleMessage(msg protocol.Message) {
 	}
 
 	// All other messages require authentication
-	if !c.authed {
+	if !c.authed.Load() {
 		c.sendError(msg.ID, "authentication required")
 		return
 	}
@@ -39,6 +39,8 @@ func (c *Client) handleMessage(msg protocol.Message) {
 		c.handleGetFile(msg)
 	case protocol.MsgSendFile:
 		c.handleSendFile(msg)
+	case protocol.MsgCancelFile:
+		c.handleCancelFile(msg)
 	case protocol.MsgScreenshot:
 		c.handleScreenshot(msg)
 	case protocol.MsgSystemInfo:
@@ -68,7 +70,7 @@ func (c *Client) handleAuth(msg protocol.Message) {
 		return
 	}
 
-	c.authed = true
+	c.authed.Store(true)
 	log.Printf("[client %s] Authenticated (user: %s)", c.id, auth.Username)
 
 	c.sendResponse(msg.ID, protocol.MsgAuthOk, map[string]string{
@@ -189,16 +191,63 @@ func (c *Client) handleSendFile(msg protocol.Message) {
 		return
 	}
 
-	if err := filesystem.WriteFileChunk(sendPayload.Path, sendPayload.Data, sendPayload.Offset); err != nil {
-		c.sendError(msg.ID, fmt.Sprintf("send_file error: %v", err))
-		return
+	committed := false
+	if sendPayload.TransferID == "" {
+		// Keep the original protocol behavior for older clients that do not send
+		// an atomic transfer ID.
+		if err := filesystem.WriteFileChunk(sendPayload.Path, sendPayload.Data, sendPayload.Offset); err != nil {
+			c.sendError(msg.ID, fmt.Sprintf("send_file error: %v", err))
+			return
+		}
+		committed = sendPayload.Final
+	} else {
+		if err := filesystem.WriteAtomicUploadChunk(
+			sendPayload.Path,
+			sendPayload.TransferID,
+			sendPayload.Data,
+			sendPayload.Offset,
+			sendPayload.TotalSize,
+			sendPayload.Final,
+			sendPayload.Checksum,
+		); err != nil {
+			c.sendError(msg.ID, fmt.Sprintf("send_file error: %v", err))
+			return
+		}
+		committed = sendPayload.Final
 	}
 
-	// Acknowledge the chunk
-	c.sendResponse(msg.ID, protocol.MsgFileAck, map[string]interface{}{
+	// Acknowledge the chunk. The committed field is only part of the extended
+	// atomic-transfer contract; legacy clients keep the original ACK shape.
+	ack := map[string]interface{}{
 		"path":   sendPayload.Path,
 		"offset": sendPayload.Offset,
 		"final":  sendPayload.Final,
+	}
+	if sendPayload.TransferID != "" {
+		ack["committed"] = committed
+	}
+	c.sendResponse(msg.ID, protocol.MsgFileAck, ack)
+}
+
+func (c *Client) handleCancelFile(msg protocol.Message) {
+	payloadBytes, err := json.Marshal(msg.Payload)
+	if err != nil {
+		c.sendError(msg.ID, "invalid cancel_file payload")
+		return
+	}
+	var cancelPayload protocol.CancelFilePayload
+	if err := json.Unmarshal(payloadBytes, &cancelPayload); err != nil {
+		c.sendError(msg.ID, "invalid cancel_file payload format")
+		return
+	}
+	if err := filesystem.CancelAtomicUpload(cancelPayload.Path, cancelPayload.TransferID); err != nil {
+		c.sendError(msg.ID, fmt.Sprintf("cancel_file error: %v", err))
+		return
+	}
+	c.sendResponse(msg.ID, protocol.MsgFileAck, map[string]interface{}{
+		"path":      cancelPayload.Path,
+		"committed": false,
+		"canceled":  true,
 	})
 }
 

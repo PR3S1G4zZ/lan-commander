@@ -1,19 +1,30 @@
 <script lang="ts">
 	import { addNotification } from '../stores/ui';
-	import { connectAgent } from '../utils/api';
+	import { connectAgent, connectAgentSecure } from '../utils/api';
+	import { getErrorMessage } from '../utils/format';
 	import Icon from './Icon.svelte';
 
 	let { onclose = () => {} }: { onclose: () => void } = $props();
 	let host = $state('');
 	let port = $state(9474);
 	let authToken = $state('');
+	let useTLS = $state(false);
+	let caFile = $state('');
+	let serverName = $state('');
 	let connecting = $state(false);
 
 	async function connect() {
 		if (!host.trim()) { addNotification('warning', 'Enter a host'); return; }
 		connecting = true;
-		try { await connectAgent(host, port, authToken); addNotification('success', `Connected to ${host}:${port}`); onclose(); }
-		catch (err: any) { addNotification('error', `Connection failed: ${err.message || err}`); }
+		try {
+			if (useTLS) {
+				await connectAgentSecure(host, port, authToken, caFile, serverName);
+			} else {
+				await connectAgent(host, port, authToken);
+			}
+			addNotification('success', `Connected to ${host}:${port}`);
+			onclose();
+		} catch (err) { addNotification('error', `Connection failed: ${getErrorMessage(err)}`); }
 		finally { connecting = false; }
 	}
 </script>
@@ -43,6 +54,20 @@
 				<span class="text-sm text-slate-400">Auth Token (optional)</span>
 				<input type="password" bind:value={authToken} placeholder="Leave empty if no auth" class="bg-slate-700 text-slate-200 rounded-lg px-3 py-2 text-sm outline-none border border-slate-600 focus:border-cyan-500" />
 			</label>
+			<label class="flex items-center gap-2 text-sm text-slate-300">
+				<input type="checkbox" bind:checked={useTLS} class="accent-cyan-500" />
+				<span>Use verified TLS (wss)</span>
+			</label>
+			{#if useTLS}
+				<label class="flex flex-col gap-1">
+					<span class="text-sm text-slate-400">CA file (optional)</span>
+					<input type="text" bind:value={caFile} placeholder="C:\\certs\\lan-ca.pem" aria-label="CA certificate file" class="bg-slate-700 text-slate-200 rounded-lg px-3 py-2 text-sm outline-none border border-slate-600 focus:border-cyan-500" />
+				</label>
+				<label class="flex flex-col gap-1">
+					<span class="text-sm text-slate-400">TLS server name (optional)</span>
+					<input type="text" bind:value={serverName} placeholder="agent.example.internal" aria-label="TLS server name" class="bg-slate-700 text-slate-200 rounded-lg px-3 py-2 text-sm outline-none border border-slate-600 focus:border-cyan-500" />
+				</label>
+			{/if}
 		</div>
 
 		<div class="flex justify-end gap-2 px-6 py-4 border-t border-slate-700">
