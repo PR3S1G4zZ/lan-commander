@@ -19,6 +19,7 @@ type Session struct {
 	Name          string    `json:"name"`
 	Host          string    `json:"host"`
 	Port          int       `json:"port"`
+	Secure        bool      `json:"secure"`
 	AuthToken     string    `json:"auth_token,omitempty"`
 	TLS           bool      `json:"tls,omitempty"`
 	CAFile        string    `json:"ca_file,omitempty"`
@@ -118,6 +119,7 @@ func (m *Manager) createTable() error {
 		name TEXT NOT NULL DEFAULT '',
 		host TEXT NOT NULL,
 		port INTEGER NOT NULL,
+		secure INTEGER NOT NULL DEFAULT 0,
 		auth_token TEXT NOT NULL DEFAULT '',
 		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		last_connected DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -154,6 +156,7 @@ func (m *Manager) migrateSchema() error {
 		name string
 		ddl  string
 	}{
+		{name: "secure", ddl: "ALTER TABLE sessions ADD COLUMN secure INTEGER NOT NULL DEFAULT 0"},
 		{name: "auth_token_protected", ddl: "ALTER TABLE sessions ADD COLUMN auth_token_protected TEXT NOT NULL DEFAULT ''"},
 		{name: "tls_enabled", ddl: "ALTER TABLE sessions ADD COLUMN tls_enabled INTEGER NOT NULL DEFAULT 0"},
 		{name: "ca_file", ddl: "ALTER TABLE sessions ADD COLUMN ca_file TEXT NOT NULL DEFAULT ''"},
@@ -199,11 +202,21 @@ func (m *Manager) Save(s Session) (int64, error) {
 		}
 	}
 
+	secure := 0
+	if s.Secure || s.TLS {
+		secure = 1
+	}
+	tlsEnabled := 0
+	if s.TLS || s.Secure {
+		tlsEnabled = 1
+	}
+
 	query := `
-	INSERT INTO sessions (name, host, port, auth_token, auth_token_protected, tls_enabled, ca_file, server_name, created_at, last_connected)
-	VALUES (?, ?, ?, '', ?, ?, ?, ?, ?, ?)
+	INSERT INTO sessions (name, host, port, secure, auth_token, auth_token_protected, tls_enabled, ca_file, server_name, created_at, last_connected)
+	VALUES (?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(host, port) DO UPDATE SET
 		name = excluded.name,
+		secure = excluded.secure,
 		auth_token = '',
 		auth_token_protected = excluded.auth_token_protected,
 		tls_enabled = excluded.tls_enabled,
@@ -211,11 +224,7 @@ func (m *Manager) Save(s Session) (int64, error) {
 		server_name = excluded.server_name,
 		last_connected = excluded.last_connected;`
 
-	tlsEnabled := 0
-	if s.TLS {
-		tlsEnabled = 1
-	}
-	result, err := m.db.Exec(query, s.Name, s.Host, s.Port, protectedToken, tlsEnabled, s.CAFile, s.ServerName, s.CreatedAt, s.LastConnected)
+	result, err := m.db.Exec(query, s.Name, s.Host, s.Port, secure, protectedToken, tlsEnabled, s.CAFile, s.ServerName, s.CreatedAt, s.LastConnected)
 	if err != nil {
 		return 0, fmt.Errorf("failed to save session: %w", err)
 	}
@@ -260,7 +269,7 @@ func (m *Manager) LoadAll() ([]Session, error) {
 	}
 
 	rows, err := m.db.Query(
-		"SELECT id, name, host, port, auth_token, auth_token_protected, tls_enabled, ca_file, server_name, created_at, last_connected FROM sessions ORDER BY last_connected DESC")
+		"SELECT id, name, host, port, secure, auth_token, auth_token_protected, tls_enabled, ca_file, server_name, created_at, last_connected FROM sessions ORDER BY last_connected DESC")
 	if err != nil {
 		return nil, fmt.Errorf("failed to load sessions: %w", err)
 	}
@@ -276,7 +285,7 @@ func (m *Manager) LoadAll() ([]Session, error) {
 		var s Session
 		var protectedToken string
 		var tlsEnabled int
-		if err := rows.Scan(&s.ID, &s.Name, &s.Host, &s.Port, &s.AuthToken, &protectedToken, &tlsEnabled, &s.CAFile, &s.ServerName, &s.CreatedAt, &s.LastConnected); err != nil {
+		if err := rows.Scan(&s.ID, &s.Name, &s.Host, &s.Port, &s.Secure, &s.AuthToken, &protectedToken, &tlsEnabled, &s.CAFile, &s.ServerName, &s.CreatedAt, &s.LastConnected); err != nil {
 			return nil, fmt.Errorf("failed to scan session row: %w", err)
 		}
 		loadedRows = append(loadedRows, sessionRow{
@@ -301,6 +310,7 @@ func (m *Manager) LoadAll() ([]Session, error) {
 			return nil, err
 		}
 		s.TLS = loaded.tlsEnabled
+		s.Secure = s.Secure || s.TLS
 		sessions = append(sessions, s)
 	}
 
@@ -320,9 +330,9 @@ func (m *Manager) LoadByHost(host string, port int) (*Session, error) {
 	var protectedToken string
 	var tlsEnabled int
 	err := m.db.QueryRow(
-		"SELECT id, name, host, port, auth_token, auth_token_protected, tls_enabled, ca_file, server_name, created_at, last_connected FROM sessions WHERE host = ? AND port = ?",
+		"SELECT id, name, host, port, secure, auth_token, auth_token_protected, tls_enabled, ca_file, server_name, created_at, last_connected FROM sessions WHERE host = ? AND port = ?",
 		host, port,
-	).Scan(&s.ID, &s.Name, &s.Host, &s.Port, &s.AuthToken, &protectedToken, &tlsEnabled, &s.CAFile, &s.ServerName, &s.CreatedAt, &s.LastConnected)
+	).Scan(&s.ID, &s.Name, &s.Host, &s.Port, &s.Secure, &s.AuthToken, &protectedToken, &tlsEnabled, &s.CAFile, &s.ServerName, &s.CreatedAt, &s.LastConnected)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -336,6 +346,7 @@ func (m *Manager) LoadByHost(host string, port int) (*Session, error) {
 		return nil, err
 	}
 	s.TLS = tlsEnabled != 0
+	s.Secure = s.Secure || s.TLS
 	return &s, nil
 }
 

@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onDestroy } from 'svelte';
-	import { agents, selectedAgentId, type AgentInfo, type ScreenshotData, type SystemInfo } from '../stores/agents';
+	import { agents, selectedAgentId, type AgentInfo, type ScreenshotData } from '../stores/agents';
 	import { addNotification, currentView } from '../stores/ui';
 	import { requestScreenshot } from '../utils/api';
 	import { formatBytes, formatPercent, formatUptime, getErrorMessage, getOsMeta } from '../utils/format';

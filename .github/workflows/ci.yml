@@ -171,5 +171,7 @@ jobs:
             agent/build/lan-agent.exe
             agent/build/lan-agent-linux
             installers/windows/lan-agent.exe
+            agent-ui/build/bin/lan-agent-ui.exe
+            installers/windows/lan-agent-ui.exe
             installers/linux/lan-agent-linux
             control-center/build/bin/lan-commander.exe

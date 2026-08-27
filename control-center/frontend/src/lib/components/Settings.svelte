@@ -13,6 +13,7 @@
 	let newSessionPort = $state(9474);
 	let newSessionName = $state('');
 	let newSessionToken = $state('');
+	let newSessionSecure = $state(false);
 	let sessionsError = $state<string | null>(null);
 
 	$effect(() => { loadSessions(); });
@@ -45,10 +46,11 @@
 	async function addSession() {
 		if (!newSessionHost.trim()) return;
 		try {
-			await saveSession(newSessionHost, newSessionPort, newSessionName || newSessionHost, newSessionToken);
+			await saveSession(newSessionHost, newSessionPort, newSessionName || newSessionHost, newSessionToken, newSessionSecure);
 			await loadSessions();
 			newSessionHost = '';
 			newSessionToken = '';
+			newSessionSecure = false;
 			addNotification('success', 'Session saved');
 		}
 		catch (err) { addNotification('error', `Save failed: ${getErrorMessage(err)}`); }
@@ -80,6 +82,7 @@
 			<input type="number" bind:value={newSessionPort} aria-label="Session port" class="bg-slate-700 text-slate-200 rounded-lg px-3 py-2 text-sm outline-none border border-slate-600 focus:border-cyan-500 w-24" />
 			<input type="text" bind:value={newSessionName} aria-label="Session name" placeholder="Name" class="bg-slate-700 text-slate-200 rounded-lg px-3 py-2 text-sm outline-none border border-slate-600 focus:border-cyan-500" />
 			<input type="password" bind:value={newSessionToken} aria-label="Session auth token" placeholder="Auth token" class="bg-slate-700 text-slate-200 rounded-lg px-3 py-2 text-sm outline-none border border-slate-600 focus:border-cyan-500" />
+			<label class="flex items-center gap-2 text-sm text-slate-300 pb-2"><input type="checkbox" bind:checked={newSessionSecure} /> TLS</label>
 			<button class="px-4 py-2 rounded-lg text-sm font-medium bg-slate-700 hover:bg-slate-600 text-slate-100 cursor-pointer border-none" onclick={addSession}>Save</button>
 		</div>
 
@@ -92,7 +95,7 @@
 				{#each sessionsList as session (session.id)}
 					<div class="flex items-center gap-3 px-3 py-2 rounded-lg bg-slate-800/50 text-sm">
 						<span class="flex-1 text-slate-200 font-medium">{session.name}</span>
-						<span class="text-slate-400 font-mono">{session.host}:{session.port}</span>
+						<span class="text-slate-400 font-mono">{session.host}:{session.port}</span><span class="text-xs text-cyan-400">{session.secure ? 'TLS' : 'LAN'}</span>
 						<span class="text-xs text-slate-500">{new Date(session.last_connected).toLocaleDateString()}</span>
 						<button aria-label={`Delete session ${session.name}`} class="text-slate-500 hover:text-red-400 transition-colors bg-transparent border-none cursor-pointer p-1 rounded hover:bg-slate-700" onclick={() => removeSession(session.id)}>
 							<Icon name="x" size={13} />

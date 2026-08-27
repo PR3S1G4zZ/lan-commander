@@ -40,6 +40,7 @@ function normalizeAgent(raw: Record<string, unknown>): AgentInfo {
 		os: String(raw.os ?? ''),
 		arch: String(raw.arch ?? ''),
 		connected: Boolean(raw.connected),
+		secure: Boolean(raw.secure),
 		lastSeen: (raw.last_seen ?? raw.lastSeen ?? '') as string,
 		systemInfo: (raw.system_info ?? raw.systemInfo ?? null) as AgentInfo['systemInfo'],
 		systemInfoError: null,
@@ -53,7 +54,8 @@ export async function getAgents(): Promise<AgentInfo[]> {
 	return raw.map(normalizeAgent);
 }
 
-export async function connectAgent(host: string, port: number, authToken: string = '') {
+export async function connectAgent(host: string, port: number, authToken: string = '', secure: boolean = false) {
+	if (secure) return connectAgentSecure(host, port, authToken);
 	return callBinding('ConnectAgent', host, port, authToken);
 }
 
@@ -124,7 +126,8 @@ export async function getSessions() {
 	return callBinding('GetSessions');
 }
 
-export async function saveSession(host: string, port: number, name: string, authToken: string = '') {
+export async function saveSession(host: string, port: number, name: string, authToken: string = '', secure: boolean = false) {
+	if (secure) return saveSessionSecure(host, port, name, authToken);
 	return callBinding('SaveSession', host, port, name, authToken);
 }
 
@@ -159,4 +162,8 @@ export async function saveScript(name: string, content: string) {
 // --- Audit ---
 export async function getAuditLogs(limit: number = 100) {
 	return callBinding('GetAuditLogs', limit);
+}
+
+export async function chooseSavePath(defaultFilename: string) {
+	return callBinding('ChooseSavePath', defaultFilename);
 }

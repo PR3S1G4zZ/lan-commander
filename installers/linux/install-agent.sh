@@ -1,78 +1,38 @@
 #!/usr/bin/env bash
-#
-# LAN Commander Agent - instalador para Linux.
-#
-# El agente SIEMPRE queda protegido con un token de autenticacion. Si no se
-# indica uno, el instalador genera uno aleatorio y lo muestra al final: hay que
-# copiarlo en el Control Center para poder conectarse a este equipo.
-#
-# Uso normal (genera token automaticamente, puerto 9474 por defecto):
-#   sudo ./install-agent.sh
-#
-# Con un token propio (el mismo para toda la flota):
-#   sudo ./install-agent.sh --auth-token "un-secreto"
-#
-# Puerto distinto:
-#   sudo ./install-agent.sh --port 9500
-#
-# Mostrar el aviso de gestion en la interfaz visual:
-#   sudo ./install-agent.sh --managed-by-notice "Nombre de la organizacion"
-#
-# Restringir el firewall a la IP del equipo administrador (recomendado):
-#   sudo ./install-agent.sh --allow-from 192.168.1.10
-#
-# Instalar SIN autenticacion (inseguro, solo para pruebas en red aislada):
-#   sudo ./install-agent.sh --no-auth
-#
-# Desinstalar:
-#   sudo ./install-agent.sh --uninstall
-#
+# LAN Commander Agent installer for Linux/systemd.
+# The privileged service and the separate desktop UI are installed together.
 set -euo pipefail
 
 PORT="9474"
 AUTH_TOKEN=""
 ALLOW_FROM=""
 MANAGED_BY_NOTICE=""
+TLS_CERT=""
+TLS_KEY=""
+SECURE=0
 NO_AUTH=0
 UNINSTALL=0
 GENERATED_TOKEN=0
 INSTALL_DIR="/usr/local/bin"
 BIN_NAME="lan-agent"
 SRC_BIN="lan-agent-linux"
+UI_NAME="lan-agent-ui"
 FIREWALL_STATE_DIR="/var/lib/lan-commander"
 FIREWALL_STATE_FILE="${FIREWALL_STATE_DIR}/firewall-rule"
 FIREWALL_RULE_COMMENT="LAN Commander Agent (lan-commander)"
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
-	--port)
-		PORT="$2"
-		shift 2
-		;;
-	--auth-token)
-		AUTH_TOKEN="$2"
-		shift 2
-		;;
-	--allow-from)
-		ALLOW_FROM="$2"
-		shift 2
-		;;
-	--managed-by-notice)
-		MANAGED_BY_NOTICE="$2"
-		shift 2
-		;;
-	--no-auth)
-		NO_AUTH=1
-		shift
-		;;
-	--uninstall)
-		UNINSTALL=1
-		shift
-		;;
-	*)
-		echo "Argumento desconocido: $1"
-		exit 1
-		;;
+	--port) PORT="${2:?Falta el puerto}"; shift 2 ;;
+	--auth-token) AUTH_TOKEN="${2:?Falta el token}"; shift 2 ;;
+	--allow-from) ALLOW_FROM="${2:?Falta la IP de origen}"; shift 2 ;;
+	--managed-by-notice) MANAGED_BY_NOTICE="${2:?Falta el nombre de la organizacion}"; shift 2 ;;
+	--tls-cert) TLS_CERT="${2:?Falta el certificado TLS}"; shift 2 ;;
+	--tls-key) TLS_KEY="${2:?Falta la clave TLS}"; shift 2 ;;
+	--secure) SECURE=1; shift ;;
+	--no-auth) NO_AUTH=1; shift ;;
+	--uninstall) UNINSTALL=1; shift ;;
+	*) echo "Argumento desconocido: $1" >&2; exit 1 ;;
 	esac
 done
 
@@ -91,19 +51,30 @@ if [[ -n "${ALLOW_FROM}" ]] && ! [[ "${ALLOW_FROM}" =~ ^[0-9A-Fa-f:.\/]+$ ]]; th
 	echo "--allow-from debe ser una direccion IP o una red CIDR." >&2
 	exit 1
 fi
-
-if [[ "${NO_AUTH}" -eq 1 && -n "${AUTH_TOKEN}" ]]; then
-	echo "--no-auth no se puede combinar con --auth-token." >&2
+if [[ -n "${TLS_CERT}" && -z "${TLS_KEY}" ]] || [[ -z "${TLS_CERT}" && -n "${TLS_KEY}" ]]; then
+	echo "--tls-cert y --tls-key deben usarse juntos." >&2
 	exit 1
 fi
-
+if (( SECURE == 1 )) && [[ -z "${TLS_CERT}" || -z "${TLS_KEY}" ]]; then
+	echo "--secure requiere --tls-cert y --tls-key." >&2
+	exit 1
+fi
+if [[ "${MANAGED_BY_NOTICE}" == *'"'* || "${MANAGED_BY_NOTICE}" == *'\'* || "${MANAGED_BY_NOTICE}" == *$'\n'* ]]; then
+	echo "--managed-by-notice contiene caracteres no permitidos." >&2
+exit 1
+fi
+if [[ "${NO_AUTH}" -eq 1 && -n "${AUTH_TOKEN}" ]]; then
+	echo "--no-auth no se puede combinar con --auth-token." >&2
+exit 1
+fi
 if [[ "${EUID}" -ne 0 ]]; then
 	echo "Este script debe ejecutarse como root: sudo ./install-agent.sh" >&2
-	exit 1
+exit 1
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEST="${INSTALL_DIR}/${BIN_NAME}"
+UI_DEST="${INSTALL_DIR}/${UI_NAME}"
 
 validate_firewall_state_port() {
 	[[ "$1" =~ ^[0-9]{1,5}$ ]] || return 1
@@ -226,9 +197,8 @@ remove_firewall_rule() {
 }
 
 configure_firewall() {
-	# Quitar primero la regla que esta instalacion registro, si existe. Nunca
-	# se elimina una regla solo por coincidir el puerto: el estado y la marca
-	# identifican exclusivamente la regla creada por este instalador.
+	# Remove only the rule recorded by this installer. Never remove a rule just
+	# because another firewall rule happens to use the same port.
 	if ! remove_firewall_rule; then
 		echo "No se pudo retirar la regla de firewall anterior; se cancela la instalacion para no acumular reglas." >&2
 		return 1
@@ -264,27 +234,30 @@ configure_firewall() {
 
 if [[ "${UNINSTALL}" -eq 1 ]]; then
 	echo "Deteniendo y desinstalando el servicio..."
-	"${DEST}" stop >/dev/null 2>&1 || true
-	"${DEST}" uninstall >/dev/null 2>&1 || true
+if [[ -f "${DEST}" ]]; then
+		"${DEST}" stop >/dev/null 2>&1 || true
+		"${DEST}" uninstall >/dev/null 2>&1 || true
+	fi
 	if ! remove_firewall_rule; then
 		echo "Advertencia: no se pudo retirar la regla de firewall registrada." >&2
 	fi
-	rm -f "${DEST}"
-	rm -f /etc/xdg/autostart/lan-commander-ui.desktop
+	rm -f "${DEST}" "${UI_DEST}" /etc/xdg/autostart/lan-commander-ui.desktop
 	echo "Agente desinstalado."
 	exit 0
 fi
 
-echo "Instalando LAN Commander Agent..."
+if [[ ! -f "${SCRIPT_DIR}/${SRC_BIN}" ]]; then
+	echo "No se encontro ${SRC_BIN} junto a este script." >&2
+	exit 1
+fi
+if [[ ! -f "${SCRIPT_DIR}/${UI_NAME}" ]]; then
+	echo "No se encontro ${UI_NAME} junto a este script." >&2
+	exit 1
+fi
 
-# --- Autenticacion ---
-# Sin token, cualquier equipo de la LAN puede ejecutar comandos como root en
-# esta maquina. Por eso el token es obligatorio salvo que se pida --no-auth.
+echo "Instalando LAN Commander Agent..."
 if [[ "${NO_AUTH}" -eq 1 ]]; then
-	echo ""
-	echo "  ADVERTENCIA: instalando SIN autenticacion (--no-auth)."
-	echo "  Cualquier equipo de la red podra ejecutar comandos como root aqui."
-	echo ""
+	echo "ADVERTENCIA: instalando SIN autenticacion (--no-auth)."
 	AUTH_TOKEN=""
 elif [[ -z "${AUTH_TOKEN}" ]]; then
 	if command -v openssl >/dev/null 2>&1; then
@@ -295,64 +268,49 @@ elif [[ -z "${AUTH_TOKEN}" ]]; then
 	GENERATED_TOKEN=1
 fi
 
-if [[ ! -f "${SCRIPT_DIR}/${SRC_BIN}" ]]; then
-	echo "No se encontro ${SRC_BIN} junto a este script." >&2
-	exit 1
-fi
-
 install -m 755 "${SCRIPT_DIR}/${SRC_BIN}" "${DEST}"
-# Registrar la interfaz visual para sesiones gráficas XDG. El servicio systemd
-# continúa siendo un proceso separado y privilegiado.
-UI_EXEC="${DEST} --ui --port ${PORT}"
-if [[ -n "${MANAGED_BY_NOTICE}" ]]; then
-	UI_EXEC="${UI_EXEC} --managed-by-notice \"${MANAGED_BY_NOTICE}\""
-fi
+install -m 755 "${SCRIPT_DIR}/${UI_NAME}" "${UI_DEST}"
+
+# The UI runs as the logged-in user while the agent remains a privileged
+# service. It checks the local health endpoint directly from the Wails app.
 install -d -m 755 /etc/xdg/autostart
+UI_EXEC="${UI_DEST} --port ${PORT}"
+if (( SECURE == 1 )); then UI_EXEC+=" --secure"; fi
+if [[ -n "${MANAGED_BY_NOTICE}" ]]; then UI_EXEC+=" --managed-by-notice \"${MANAGED_BY_NOTICE}\""; fi
 cat > /etc/xdg/autostart/lan-commander-ui.desktop <<EOF
 [Desktop Entry]
 Type=Application
 Name=LAN Commander
-Comment=Interfaz de usuario del agente LAN Commander
+Comment=Aplicacion de escritorio del agente LAN Commander
 Exec=${UI_EXEC}
 Terminal=false
 NoDisplay=false
 X-GNOME-Autostart-enabled=true
 EOF
-echo "  Interfaz visual registrada para iniciar sesion"
 
-# Firewall (best-effort segun lo que haya instalado)
 configure_firewall
 
-# Si ya habia una instalacion previa, la reinstalamos limpio para tomar los nuevos parametros
+# Reinstall the service cleanly so changed arguments take effect.
 "${DEST}" stop >/dev/null 2>&1 || true
 "${DEST}" uninstall >/dev/null 2>&1 || true
-
 INSTALL_ARGS=(install --port "${PORT}")
 if [[ -n "${AUTH_TOKEN}" ]]; then
 	INSTALL_ARGS+=(--auth-token "${AUTH_TOKEN}")
 elif [[ "${NO_AUTH}" -eq 1 ]]; then
 	INSTALL_ARGS+=(--no-auth)
 fi
+if [[ -n "${TLS_CERT}" ]]; then
+	INSTALL_ARGS+=(--tls-cert "${TLS_CERT}" --tls-key "${TLS_KEY}")
+fi
 
 "${DEST}" "${INSTALL_ARGS[@]}"
 "${DEST}" start
+systemctl enable LANCommanderAgent.service >/dev/null 2>&1 || true
 
-echo ""
-echo "Listo. El agente quedo instalado como servicio systemd ('LANCommanderAgent'),"
-echo "arranca solo con el sistema y escucha en el puerto ${PORT}."
-echo "Deberia aparecer solo en el Control Center via descubrimiento en red (mDNS)."
-
+echo "Servicio y aplicacion de escritorio instalados."
 if [[ "${GENERATED_TOKEN}" -eq 1 ]]; then
-	echo ""
-	echo "====================================================================="
-	echo " TOKEN DE ACCESO (guardalo, no se vuelve a mostrar):"
-	echo ""
-	echo "   ${AUTH_TOKEN}"
-	echo ""
-	echo " Cargalo en el Control Center al agregar este equipo. Sin el token"
-	echo " el agente rechaza cualquier conexion."
-	echo "====================================================================="
+	echo "TOKEN DE ACCESO (guardalo; no se vuelve a mostrar):"
+	echo "${AUTH_TOKEN}"
 elif [[ "${NO_AUTH}" -eq 0 ]]; then
-	echo ""
 	echo "El agente usa el token que indicaste en --auth-token."
 fi

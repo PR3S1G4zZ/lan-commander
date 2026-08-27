@@ -35,6 +35,7 @@ type AgentInfo struct {
 	Host       string                      `json:"host"`
 	Port       int                         `json:"port"`
 	AuthToken  string                      `json:"auth_token,omitempty"`
+	Secure     bool                        `json:"secure"`
 	Name       string                      `json:"name"`
 	OS         string                      `json:"os"`
 	Arch       string                      `json:"arch"`
@@ -332,6 +333,7 @@ func (m *Manager) ConnectWithOptions(host string, port int, options ConnectOptio
 		Host:      host,
 		Port:      port,
 		AuthToken: options.AuthToken,
+		Secure:    options.tlsEnabled(),
 		Connected: true,
 		LastSeen:  time.Now(),
 	}

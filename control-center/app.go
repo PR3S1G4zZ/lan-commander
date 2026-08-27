@@ -115,7 +115,7 @@ func (a *App) startup(ctx context.Context) {
 		for _, s := range savedSessions {
 			agentID, err := a.clientMgr.ConnectWithOptions(s.Host, s.Port, client.ConnectOptions{
 				AuthToken:  s.AuthToken,
-				TLS:        s.TLS,
+				TLS:        s.TLS || s.Secure,
 				CAFile:     s.CAFile,
 				ServerName: s.ServerName,
 			})
@@ -207,15 +207,18 @@ func (a *App) savedOptionsFor(host string, port int) client.ConnectOptions {
 	if a.sessions == nil {
 		return client.ConnectOptions{}
 	}
+
 	saved, err := a.sessions.LoadAll()
+
 	if err != nil {
 		return client.ConnectOptions{}
 	}
+
 	for _, s := range saved {
 		if s.Host == host && s.Port == port {
 			return client.ConnectOptions{
 				AuthToken:  s.AuthToken,
-				TLS:        s.TLS,
+				TLS:        s.TLS || s.Secure,
 				CAFile:     s.CAFile,
 				ServerName: s.ServerName,
 			}
@@ -231,6 +234,8 @@ func (a *App) onAgentMessage(agentID string, msg *protocol.Message) {
 	switch msg.Type {
 	case protocol.MsgCommandResult:
 		a.audit.Log("command_result", agentID, "system", "Command result received", audit.StatusSuccess)
+	case protocol.MsgSystemUpdate:
+		a.audit.Log("system_update", agentID, "system", "System info update received", audit.StatusSuccess)
 	case protocol.MsgError:
 		errDetail := msg.Error
 		if errDetail == "" {
@@ -306,6 +311,7 @@ func sessionForConnectionOptions(host string, port int, name string, options cli
 		Host:       host,
 		Port:       port,
 		AuthToken:  options.AuthToken,
+		Secure:     options.TLS || options.UseTLS,
 		TLS:        options.TLS || options.UseTLS,
 		CAFile:     options.CAFile,
 		ServerName: options.ServerName,
@@ -498,6 +504,38 @@ func (a *App) RequestScreenshot(agentID string) (*protocol.ScreenshotDataPayload
 	}
 
 	return &result, nil
+}
+
+func (a *App) ChooseSavePath(defaultFilename string) (string, error) {
+
+	if a.ctx == nil {
+
+		return "", fmt.Errorf("application is not ready")
+
+	}
+
+	if defaultFilename == "" {
+
+		defaultFilename = "download.bin"
+
+	}
+
+	path, err := wailsruntime.SaveFileDialog(a.ctx, wailsruntime.SaveDialogOptions{
+
+		Title: "Guardar archivo remoto",
+
+		DefaultFilename: filepath.Base(defaultFilename),
+
+		CanCreateDirectories: true,
+	})
+
+	if err != nil {
+
+		return "", fmt.Errorf("save dialog failed: %w", err)
+
+	}
+
+	return path, nil
 }
 
 // --- Binding: TransferFile ---

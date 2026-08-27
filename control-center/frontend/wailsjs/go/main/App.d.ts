@@ -6,6 +6,8 @@ import {audit} from '../models';
 import {scripting} from '../models';
 import {session} from '../models';
 
+export function ChooseSavePath(arg1:string):Promise<string>;
+
 export function ConnectAgent(arg1:string,arg2:number,arg3:string):Promise<void>;
 
 export function ConnectAgentSecure(arg1:string,arg2:number,arg3:string,arg4:string,arg5:string):Promise<void>;

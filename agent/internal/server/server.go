@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -80,9 +81,7 @@ func NewServer(addr, certFile, keyFile, authToken string) *Server {
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  ReadBufferSize,
 			WriteBufferSize: WriteBufferSize,
-			CheckOrigin: func(r *http.Request) bool {
-				return r.Header.Get("Origin") == ""
-			},
+			CheckOrigin:     allowedOrigin,
 		},
 		clients:     make(map[*Client]bool),
 		done:        make(chan struct{}),
@@ -92,6 +91,23 @@ func NewServer(addr, certFile, keyFile, authToken string) *Server {
 
 // Start begins listening for WebSocket connections.
 // Blocks until the server stops or an error occurs.
+
+func allowedOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	switch parsed.Hostname() {
+	case "wails", "wails.localhost", "localhost", "127.0.0.1", "::1":
+		return true
+	default:
+		return false
+	}
+}
 func (s *Server) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleWebSocket)

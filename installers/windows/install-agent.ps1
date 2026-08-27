@@ -1,75 +1,59 @@
 #Requires -RunAsAdministrator
 <#
-    LAN Commander Agent - instalador para Windows.
-
-    El agente SIEMPRE queda protegido con un token de autenticacion. Si no se
-    indica uno, el instalador genera uno aleatorio y lo muestra al final: hay
-    que copiarlo en el Control Center para poder conectarse a este equipo.
-
-    Uso normal (genera token automaticamente, puerto 9474 por defecto):
-        .\install-agent.ps1
-
-    Con un token propio (el mismo para toda la flota):
-        .\install-agent.ps1 -AuthToken "un-secreto"
-
-    Puerto distinto:
-        .\install-agent.ps1 -Port 9500
-
-    Mostrar el aviso de gestion en la interfaz visual:
-         .\install-agent.ps1 -ManagedByNotice "Nombre de la organizacion"
-
-    Restringir el firewall a la IP del equipo administrador (recomendado):
-        .\install-agent.ps1 -AllowFrom "192.168.1.10"
-
-    Instalar SIN autenticacion (inseguro, solo para pruebas en red aislada):
-        .\install-agent.ps1 -NoAuth
-
-    Desinstalar:
-        .\install-agent.ps1 -Uninstall
+LAN Commander Agent installer for Windows. Installs the privileged service and
+the separate desktop application used by logged-in users.
 #>
 param(
-    [string]$Port = "9474",
+    [ValidateRange(1, 65535)][int]$Port = 9474,
     [string]$AuthToken = "",
     [string]$InstallDir = "$env:ProgramFiles\LAN Commander Agent",
     [string]$AllowFrom = "",
     [string]$ManagedByNotice = "",
+    [string]$TlsCert = "",
+    [string]$TlsKey = "",
+    [switch]$Secure,
     [switch]$NoAuth,
     [switch]$Uninstall
 )
 
 $ErrorActionPreference = "Stop"
-$exeName   = "lan-agent.exe"
-$exeDest   = Join-Path $InstallDir $exeName
+$exeName = "lan-agent.exe"
+$uiName = "lan-agent-ui.exe"
+$exeDest = Join-Path $InstallDir $exeName
+$uiDest = Join-Path $InstallDir $uiName
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $fwRuleName = "LAN Commander Agent"
+$runKey = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run"
 
 if ($Uninstall) {
-    Write-Host "Deteniendo y desinstalando el servicio..." -ForegroundColor Yellow
+    Write-Host "Desinstalando LAN Commander..." -ForegroundColor Yellow
     if (Test-Path $exeDest) {
         & $exeDest stop 2>$null | Out-Null
         & $exeDest uninstall 2>$null | Out-Null
     }
     Remove-NetFirewallRule -DisplayName $fwRuleName -ErrorAction SilentlyContinue
-    Remove-ItemProperty -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run" -Name "LANCommanderUI" -ErrorAction SilentlyContinue
-    Remove-Item -Recurse -Force $InstallDir -ErrorAction SilentlyContinue
-    Write-Host "Agente desinstalado." -ForegroundColor Green
+    Remove-ItemProperty -Path $runKey -Name "LANCommanderUI" -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Host "LAN Commander desinstalado." -ForegroundColor Green
     exit 0
 }
 
-Write-Host "Instalando LAN Commander Agent..." -ForegroundColor Cyan
+if (($TlsCert -and -not $TlsKey) -or ($TlsKey -and -not $TlsCert)) { throw "TlsCert y TlsKey deben especificarse juntos." }
+if ($Secure -and (-not $TlsCert -or -not $TlsKey)) { throw "-Secure requiere -TlsCert y -TlsKey." }
+if ($ManagedByNotice -match '[\r\n"]') { throw "ManagedByNotice no puede contener comillas ni saltos de linea." }
 
-# --- Autenticacion ---
-# Sin token, cualquier equipo de la LAN puede ejecutar comandos como SYSTEM en
-# esta maquina. Por eso el token es obligatorio salvo que se pida -NoAuth.
+$sourceExe = Join-Path $scriptDir $exeName
+$sourceUi = Join-Path $scriptDir $uiName
+if (-not (Test-Path $sourceExe)) { throw "No se encontro $exeName junto a este script." }
+if (-not (Test-Path $sourceUi)) { throw "No se encontro $uiName junto a este script." }
+
+Write-Host "Instalando LAN Commander Agent..." -ForegroundColor Cyan
 $generatedToken = $false
 if ($NoAuth -and $AuthToken -ne "") {
     throw "-NoAuth no se puede combinar con -AuthToken."
 }
 if ($NoAuth) {
-    Write-Host ""
-    Write-Host "  ADVERTENCIA: instalando SIN autenticacion (-NoAuth)." -ForegroundColor Red
-    Write-Host "  Cualquier equipo de la red podra ejecutar comandos como SYSTEM aqui." -ForegroundColor Red
-    Write-Host ""
+    Write-Host "ADVERTENCIA: instalando SIN autenticacion." -ForegroundColor Red
     $AuthToken = ""
 } elseif ($AuthToken -eq "") {
     $bytes = New-Object 'System.Byte[]' 24
@@ -78,73 +62,35 @@ if ($NoAuth) {
     $generatedToken = $true
 }
 
-$sourceExe = Join-Path $scriptDir $exeName
-if (-not (Test-Path $sourceExe)) {
-    Write-Host "No se encontro $exeName junto a este script." -ForegroundColor Red
-    exit 1
-}
-
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-Copy-Item -Path $sourceExe -Destination $exeDest -Force
-# Registrar la interfaz para la sesión gráfica de cada usuario. El servicio y
-# la interfaz son procesos separados por el aislamiento de sesión de Windows.
-$runKey = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run"
+Copy-Item -LiteralPath $sourceExe -Destination $exeDest -Force
+Copy-Item -LiteralPath $sourceUi -Destination $uiDest -Force
+
+# La app visual corre como el usuario que inicia sesion; el servicio corre separado.
 New-Item -Path $runKey -Force | Out-Null
-$uiCommand = "`"$exeDest`" --ui --port $Port"
-if ($ManagedByNotice -ne "") {
-    $safeNotice = $ManagedByNotice.Replace('"', '\"')
-    $uiCommand += " --managed-by-notice `"$safeNotice`""
-}
+$uiCommand = "`"$uiDest`" --port $Port"
+if ($Secure) { $uiCommand += " --secure" }
+if ($ManagedByNotice) { $uiCommand += " --managed-by-notice `"$ManagedByNotice`"" }
 Set-ItemProperty -Path $runKey -Name "LANCommanderUI" -Value $uiCommand
-Write-Host "  Interfaz visual registrada para iniciar sesion" -ForegroundColor Green
 
-# Abrir el puerto en el Firewall de Windows (entrada, TCP).
-# Se recrea siempre para que -AllowFrom tome efecto en reinstalaciones.
 Remove-NetFirewallRule -DisplayName $fwRuleName -ErrorAction SilentlyContinue
-$fwParams = @{
-    DisplayName = $fwRuleName
-    Direction   = "Inbound"
-    Protocol    = "TCP"
-    LocalPort   = $Port
-    Action      = "Allow"
-}
-if ($AllowFrom -ne "") {
-    $fwParams["RemoteAddress"] = $AllowFrom -split ',' | ForEach-Object { $_.Trim() }
-}
+$fwParams = @{ DisplayName = $fwRuleName; Direction = "Inbound"; Protocol = "TCP"; LocalPort = $Port; Action = "Allow" }
+if ($AllowFrom) { $fwParams["RemoteAddress"] = $AllowFrom -split ',' | ForEach-Object { $_.Trim() } }
 New-NetFirewallRule @fwParams | Out-Null
-if ($AllowFrom -ne "") {
-    Write-Host "  Regla de firewall creada (puerto $Port/TCP, solo desde $AllowFrom)" -ForegroundColor Green
-} else {
-    Write-Host "  Regla de firewall creada (puerto $Port/TCP, abierta a toda la red local)" -ForegroundColor Yellow
-}
 
-# Si ya habia una instalacion previa, la reinstalamos limpio para tomar los nuevos parametros
 & $exeDest stop 2>$null | Out-Null
 & $exeDest uninstall 2>$null | Out-Null
-
 $installArgs = @("install", "--port", $Port)
 if ($AuthToken -ne "") { $installArgs += @("--auth-token", $AuthToken) }
 elseif ($NoAuth) { $installArgs += "--no-auth" }
-
+if ($TlsCert) { $installArgs += @("--tls-cert", $TlsCert, "--tls-key", $TlsKey) }
 & $exeDest @installArgs
 & $exeDest start
 
-Write-Host ""
-Write-Host "Listo. El agente quedo instalado como servicio de Windows ('LANCommanderAgent')," -ForegroundColor Green
-Write-Host "arranca solo con el sistema (sin ventana visible) y escucha en el puerto $Port." -ForegroundColor Green
-Write-Host "Deberia aparecer solo en el Control Center via descubrimiento en red (mDNS)." -ForegroundColor Green
-
+Write-Host "Servicio instalado y aplicacion de escritorio registrada." -ForegroundColor Green
+Write-Host "El agente escucha en TCP $Port y la aplicacion se abre al iniciar sesion." -ForegroundColor Green
+if ($Secure) { Write-Host "TLS habilitado." -ForegroundColor Green }
 if ($generatedToken) {
-    Write-Host ""
-    Write-Host "=====================================================================" -ForegroundColor Cyan
-    Write-Host " TOKEN DE ACCESO (guardalo, no se vuelve a mostrar):" -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "   $AuthToken" -ForegroundColor White
-    Write-Host ""
-    Write-Host " Cargalo en el Control Center al agregar este equipo. Sin el token" -ForegroundColor Cyan
-    Write-Host " el agente rechaza cualquier conexion." -ForegroundColor Cyan
-    Write-Host "=====================================================================" -ForegroundColor Cyan
-} elseif (-not $NoAuth) {
-    Write-Host ""
-    Write-Host "El agente usa el token que indicaste en -AuthToken." -ForegroundColor Green
+    Write-Host "TOKEN DE ACCESO (guardalo; no se vuelve a mostrar):" -ForegroundColor Cyan
+    Write-Host $AuthToken -ForegroundColor White
 }

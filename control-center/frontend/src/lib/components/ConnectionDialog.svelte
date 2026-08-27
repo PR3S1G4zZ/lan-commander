@@ -15,17 +15,21 @@
 
 	async function connect() {
 		if (!host.trim()) { addNotification('warning', 'Enter a host'); return; }
+		if (port < 1 || port > 65535) { addNotification('warning', 'Port must be between 1 and 65535'); return; }
 		connecting = true;
 		try {
 			if (useTLS) {
-				await connectAgentSecure(host, port, authToken, caFile, serverName);
+				await connectAgentSecure(host.trim(), port, authToken, caFile, serverName);
 			} else {
-				await connectAgent(host, port, authToken);
+				await connectAgent(host.trim(), port, authToken);
 			}
 			addNotification('success', `Connected to ${host}:${port}`);
 			onclose();
-		} catch (err) { addNotification('error', `Connection failed: ${getErrorMessage(err)}`); }
-		finally { connecting = false; }
+		} catch (err) {
+			addNotification('error', `Connection failed: ${getErrorMessage(err)}`);
+		} finally {
+			connecting = false;
+		}
 	}
 </script>
 

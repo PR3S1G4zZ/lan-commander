@@ -78,6 +78,7 @@ export interface AgentInfo {
 	os: string;
 	arch: string;
 	connected: boolean;
+	secure: boolean;
 	lastSeen: string;
 	systemInfo: SystemInfo | null;
 	systemInfoError: string | null;
@@ -89,6 +90,7 @@ export interface Session {
 	name: string;
 	host: string;
 	port: number;
+	secure: boolean;
 	auth_token: string;
 	created_at: string;
 	last_connected: string;

@@ -53,6 +53,7 @@ export namespace client {
 	    host: string;
 	    port: number;
 	    auth_token?: string;
+	    secure: boolean;
 	    name: string;
 	    os: string;
 	    arch: string;
@@ -71,6 +72,7 @@ export namespace client {
 	        this.host = source["host"];
 	        this.port = source["port"];
 	        this.auth_token = source["auth_token"];
+	        this.secure = source["secure"];
 	        this.name = source["name"];
 	        this.os = source["os"];
 	        this.arch = source["arch"];
@@ -368,6 +370,7 @@ export namespace session {
 	    name: string;
 	    host: string;
 	    port: number;
+	    secure: boolean;
 	    auth_token?: string;
 	    tls?: boolean;
 	    ca_file?: string;
@@ -387,6 +390,7 @@ export namespace session {
 	        this.name = source["name"];
 	        this.host = source["host"];
 	        this.port = source["port"];
+	        this.secure = source["secure"];
 	        this.auth_token = source["auth_token"];
 	        this.tls = source["tls"];
 	        this.ca_file = source["ca_file"];

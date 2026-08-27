@@ -18,6 +18,7 @@ function makeAgent(id: string, connected: boolean, overrides: Partial<AgentInfo>
 		os: 'linux',
 		arch: 'amd64',
 		connected,
+		secure: false,
 		lastSeen: '2026-01-02T03:04:05.000Z',
 		systemInfo: null,
 		systemInfoError: null,
