@@ -34,6 +34,9 @@ const (
 	PushInterval = 2 * time.Second
 	// MaxClients limits the number of active WebSocket connections.
 	MaxClients = 128
+	// MaxAuthAttempts is how many failed auth messages a connection may send
+	// before it is forcibly closed, to slow down token brute-forcing.
+	MaxAuthAttempts = 5
 )
 
 // Server manages WebSocket connections and routes messages to handlers.
@@ -55,14 +58,15 @@ type Server struct {
 
 // Client represents a single WebSocket connection.
 type Client struct {
-	conn        *websocket.Conn
-	server      *Server
-	send        chan []byte
-	done        chan struct{}
-	id          string
-	readTimeout time.Duration
-	authed      atomic.Bool
-	closeOnce   sync.Once
+	conn         *websocket.Conn
+	server       *Server
+	send         chan []byte
+	done         chan struct{}
+	id           string
+	readTimeout  time.Duration
+	authed       atomic.Bool
+	authAttempts atomic.Int32
+	closeOnce    sync.Once
 }
 
 // NewServer creates a new WebSocket server.

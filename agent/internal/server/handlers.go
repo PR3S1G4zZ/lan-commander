@@ -1,6 +1,7 @@
 package server
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -64,9 +65,14 @@ func (c *Client) handleAuth(msg protocol.Message) {
 		return
 	}
 
-	if c.server.authToken != "" && auth.Token != c.server.authToken {
-		log.Printf("[client %s] Auth failed from %s", c.id, auth.Username)
+	if c.server.authToken != "" && subtle.ConstantTimeCompare([]byte(auth.Token), []byte(c.server.authToken)) != 1 {
+		attempts := c.authAttempts.Add(1)
+		log.Printf("[client %s] Auth failed from %s (attempt %d/%d)", c.id, auth.Username, attempts, MaxAuthAttempts)
 		c.sendError(msg.ID, "invalid authentication token")
+		if attempts >= MaxAuthAttempts {
+			log.Printf("[client %s] Too many failed auth attempts, closing connection", c.id)
+			c.close()
+		}
 		return
 	}
 
