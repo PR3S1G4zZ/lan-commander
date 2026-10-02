@@ -12,6 +12,7 @@ import (
 	"github.com/shirou/gopsutil/v4/mem"
 
 	"github.com/mediacode/lan-commander/agent/internal/protocol"
+	"github.com/mediacode/lan-commander/agent/internal/version"
 )
 
 // Monitor provides system information with caching for static data.
@@ -28,7 +29,7 @@ type Monitor struct {
 // NewMonitor creates a Monitor and caches immutable system properties.
 func NewMonitor() *Monitor {
 	m := &Monitor{
-		agentVer: "1.0.0",
+		agentVer: version.Version,
 	}
 	m.initCache()
 	return m

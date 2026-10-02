@@ -32,12 +32,12 @@ type ExecutionResult struct {
 
 // ScriptResult holds the complete result of script execution.
 type ScriptResult struct {
-	ScriptName   string             `json:"script_name"`
-	AgentID      string             `json:"agent_id"`
-	Results      []ExecutionResult  `json:"results"`
-	TotalLines   int                `json:"total_lines"`
-	SuccessCount int                `json:"success_count"`
-	FailedCount  int                `json:"failed_count"`
+	ScriptName   string            `json:"script_name"`
+	AgentID      string            `json:"agent_id"`
+	Results      []ExecutionResult `json:"results"`
+	TotalLines   int               `json:"total_lines"`
+	SuccessCount int               `json:"success_count"`
+	FailedCount  int               `json:"failed_count"`
 }
 
 // Engine manages scripts and can execute them on agents.
@@ -78,8 +78,8 @@ func NewEngineWithPath(path string) *Engine {
 
 // Save stores a script both in memory and on disk.
 func (e *Engine) Save(name string, content string) error {
-	if strings.TrimSpace(name) == "" {
-		return fmt.Errorf("script name cannot be empty")
+	if err := validateScriptName(name); err != nil {
+		return err
 	}
 	if strings.TrimSpace(content) == "" {
 		return fmt.Errorf("script content cannot be empty")
@@ -112,6 +112,9 @@ func (e *Engine) Save(name string, content string) error {
 
 // Get retrieves a script by name.
 func (e *Engine) Get(name string) (*Script, error) {
+	if err := validateScriptName(name); err != nil {
+		return nil, err
+	}
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
@@ -136,6 +139,9 @@ func (e *Engine) List() []Script {
 
 // Delete removes a script by name.
 func (e *Engine) Delete(name string) error {
+	if err := validateScriptName(name); err != nil {
+		return err
+	}
 	e.mu.Lock()
 	_, exists := e.scripts[name]
 	if !exists {
@@ -151,6 +157,19 @@ func (e *Engine) Delete(name string) error {
 		return fmt.Errorf("failed to delete script file: %w", err)
 	}
 
+	return nil
+}
+
+func validateScriptName(name string) error {
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("script name cannot be empty")
+	}
+	if name == "." || name == ".." || strings.ContainsAny(name, `/\\`) || filepath.IsAbs(name) || filepath.VolumeName(name) != "" {
+		return fmt.Errorf("invalid script name %q: names must be a single filename", name)
+	}
+	if filepath.Base(name) != name {
+		return fmt.Errorf("invalid script name %q: names must be a single filename", name)
+	}
 	return nil
 }
 
@@ -263,7 +282,7 @@ func (e *Engine) loadFromDisk() error {
 	}
 
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
 
@@ -279,6 +298,10 @@ func (e *Engine) loadFromDisk() error {
 			log.Printf("scripting: failed to parse %s: %v", path, err)
 			continue
 		}
+		if validateScriptName(script.Name) != nil {
+			log.Printf("scripting: ignored script with invalid name in %s", path)
+			continue
+		}
 
 		e.scripts[script.Name] = &script
 	}
@@ -287,6 +310,9 @@ func (e *Engine) loadFromDisk() error {
 }
 
 func (e *Engine) saveToDisk(name string) error {
+	if err := validateScriptName(name); err != nil {
+		return err
+	}
 	// Ensure directory exists
 	if err := os.MkdirAll(e.basePath, 0755); err != nil {
 		return err
@@ -306,7 +332,24 @@ func (e *Engine) saveToDisk(name string) error {
 	}
 
 	path := filepath.Join(e.basePath, name+".json")
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	file, err := os.CreateTemp(e.basePath, ".script-*.tmp")
+	if err != nil {
+		return fmt.Errorf("failed to create temporary script file: %w", err)
+	}
+	tempPath := file.Name()
+	defer os.Remove(tempPath)
+	if err := file.Chmod(0644); err != nil {
+		file.Close()
+		return fmt.Errorf("failed to set script file permissions: %w", err)
+	}
+	if _, err := file.Write(data); err != nil {
+		file.Close()
+		return fmt.Errorf("failed to write script file: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("failed to close script file: %w", err)
+	}
+	if err := os.Rename(tempPath, path); err != nil {
 		return fmt.Errorf("failed to write script file: %w", err)
 	}
 

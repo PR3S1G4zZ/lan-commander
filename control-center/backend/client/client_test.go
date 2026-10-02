@@ -35,6 +35,16 @@ func tlsGreetingServer(t *testing.T, closeFirst bool) (*httptest.Server, string,
 		}
 		if closeFirst && count == 1 {
 			_ = conn.Close()
+			return
+		}
+		// Keep serving the connection until the peer goes away. Returning here
+		// would leave the hijacked socket unreferenced, and a garbage collection
+		// could close it mid-test, making concurrent-connect tests flaky.
+		defer conn.Close()
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
 		}
 	}))
 	t.Cleanup(server.Close)
@@ -166,5 +176,78 @@ func TestReconnectReusesTheExactTLSOptions(t *testing.T) {
 	}
 	if got := connections.Load(); got < 2 {
 		t.Fatalf("reconnect did not reuse TLS options; server saw %d connections", got)
+	}
+}
+
+func TestConnectWithOptionsRejectsDifferentOptionsForConnectedEndpoint(t *testing.T) {
+	server, serverName, _ := tlsGreetingServer(t, false)
+	host, port := serverEndpoint(t, server)
+	manager := NewManager(nil)
+	t.Cleanup(manager.CloseAll)
+	options := ConnectOptions{TLS: true, CAFile: writeTestCA(t, server.Certificate()), ServerName: serverName}
+	id, err := manager.ConnectWithOptions(host, port, options)
+	if err != nil {
+		t.Fatalf("initial connection: %v", err)
+	}
+	if got, err := manager.ConnectWithOptions(host, port, options); err != nil || got != id {
+		t.Fatalf("identical options should reuse connection: id=%q err=%v", got, err)
+	}
+	variants := []struct {
+		name string
+		edit func(*ConnectOptions)
+	}{
+		{name: "token", edit: func(o *ConnectOptions) { o.AuthToken = "different" }},
+		{name: "TLS", edit: func(o *ConnectOptions) { o.TLS = false }},
+		{name: "CA", edit: func(o *ConnectOptions) { o.CAFile += ".other" }},
+		{name: "server name", edit: func(o *ConnectOptions) { o.ServerName = "other.invalid" }},
+	}
+	for _, variant := range variants {
+		t.Run(variant.name, func(t *testing.T) {
+			changed := options
+			variant.edit(&changed)
+			if got, err := manager.ConnectWithOptions(host, port, changed); err == nil || got != "" || !strings.Contains(err.Error(), "different TLS or authentication options") {
+				t.Fatalf("different options not rejected clearly: id=%q err=%v", got, err)
+			}
+		})
+	}
+}
+
+func TestConcurrentConnectWithDifferentOptionsDoesNotShareConnection(t *testing.T) {
+	server, _, _ := tlsGreetingServer(t, false)
+	host, port := serverEndpoint(t, server)
+	manager := NewManager(nil)
+	t.Cleanup(manager.CloseAll)
+	start := make(chan struct{})
+	type result struct {
+		id  string
+		err error
+	}
+	results := make(chan result, 2)
+	for _, options := range []ConnectOptions{{TLS: true, CAFile: writeTestCA(t, server.Certificate())}, {TLS: true, CAFile: writeTestCA(t, server.Certificate()), AuthToken: "different-token"}} {
+		options := options
+		go func() {
+			<-start
+			id, err := manager.ConnectWithOptions(host, port, options)
+			results <- result{id: id, err: err}
+		}()
+	}
+	close(start)
+	first, second := <-results, <-results
+	successes, failures := 0, 0
+	for _, got := range []result{first, second} {
+		if got.err == nil {
+			successes++
+			if got.id == "" {
+				t.Fatal("successful connect returned empty agent ID")
+			}
+		} else {
+			failures++
+			if !strings.Contains(got.err.Error(), "different TLS or authentication options") {
+				t.Fatalf("unexpected concurrent connect error: %v", got.err)
+			}
+		}
+	}
+	if successes != 1 || failures != 1 || len(manager.ListAgents()) != 1 {
+		t.Fatalf("concurrent result: successes=%d failures=%d agents=%d", successes, failures, len(manager.ListAgents()))
 	}
 }

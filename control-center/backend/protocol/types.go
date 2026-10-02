@@ -48,7 +48,9 @@ type ExecCommandPayload struct {
 }
 
 type ListDirPayload struct {
-	Path string `json:"path"`
+	Path   string `json:"path"`
+	Offset int    `json:"offset,omitempty"`
+	Limit  int    `json:"limit,omitempty"`
 }
 
 type GetFilePayload struct {
@@ -95,9 +97,11 @@ type DirEntry struct {
 }
 
 type DirContentsPayload struct {
-	Path    string     `json:"path"`
-	Entries []DirEntry `json:"entries"`
-	Total   int        `json:"total"`
+	Path       string     `json:"path"`
+	Entries    []DirEntry `json:"entries"`
+	Total      int        `json:"total"`
+	NextOffset int        `json:"next_offset"`
+	HasMore    bool       `json:"has_more"`
 }
 
 type FileChunkPayload struct {

@@ -16,8 +16,10 @@ import (
 const (
 	// DefaultChunkSize is 64KB.
 	DefaultChunkSize = 64 * 1024
-	// MaxDirEntries limits the number of entries returned per ListDir call.
-	MaxDirEntries = 50
+	// DefaultDirEntries is the page size when the client does not ask for one.
+	DefaultDirEntries = 50
+	// MaxDirEntries limits the number of entries returned per ListDir page.
+	MaxDirEntries = 1000
 	// MaxChunkSize prevents excessive allocations from a single request.
 	MaxChunkSize = 4 * 1024 * 1024
 )
@@ -29,8 +31,12 @@ var ErrPathTraversal = fmt.Errorf("path traversal detected")
 // If the path is relative, it's converted to absolute using the current
 // working directory.
 func safePath(path string) (string, error) {
-	if strings.Contains(path, "..") {
-		return "", fmt.Errorf("%w: %q contains \"..\"", ErrPathTraversal, path)
+	// Reject ".." only as a whole path element, so legitimate names such as
+	// "backup..old.txt" are still reachable.
+	for _, element := range strings.FieldsFunc(path, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if element == ".." {
+			return "", fmt.Errorf("%w: %q contains \"..\"", ErrPathTraversal, path)
+		}
 	}
 	cleaned := filepath.Clean(path)
 	if !filepath.IsAbs(cleaned) {
@@ -43,11 +49,16 @@ func safePath(path string) (string, error) {
 	return cleaned, nil
 }
 
-// ListDir returns the contents of a directory, up to MaxDirEntries.
-func ListDir(path string) (protocol.DirContentsPayload, error) {
+// ListDir returns one page of a directory. Entries are ordered by name, so
+// offset/limit are stable between calls. limit <= 0 selects DefaultDirEntries
+// and values above MaxDirEntries are capped. Total is the real entry count.
+func ListDir(path string, offset, limit int) (protocol.DirContentsPayload, error) {
 	safe, err := safePath(path)
 	if err != nil {
 		return protocol.DirContentsPayload{}, err
+	}
+	if offset < 0 {
+		return protocol.DirContentsPayload{}, fmt.Errorf("invalid offset %d", offset)
 	}
 
 	info, err := os.Stat(safe)
@@ -63,13 +74,25 @@ func ListDir(path string) (protocol.DirContentsPayload, error) {
 		return protocol.DirContentsPayload{}, fmt.Errorf("cannot read directory %q: %w", safe, err)
 	}
 
-	limit := MaxDirEntries
-	if len(entries) < limit {
-		limit = len(entries)
+	if limit <= 0 {
+		limit = DefaultDirEntries
+	}
+	if limit > MaxDirEntries {
+		limit = MaxDirEntries
 	}
 
-	dirEntries := make([]protocol.DirEntry, 0, limit)
-	for _, e := range entries[:limit] {
+	total := len(entries)
+	start := offset
+	if start > total {
+		start = total
+	}
+	end := start + limit
+	if end > total {
+		end = total
+	}
+
+	dirEntries := make([]protocol.DirEntry, 0, end-start)
+	for _, e := range entries[start:end] {
 		fi, err := e.Info()
 		if err != nil {
 			continue
@@ -85,9 +108,11 @@ func ListDir(path string) (protocol.DirContentsPayload, error) {
 	}
 
 	return protocol.DirContentsPayload{
-		Path:    safe,
-		Entries: dirEntries,
-		Total:   len(dirEntries),
+		Path:       safe,
+		Entries:    dirEntries,
+		Total:      total,
+		NextOffset: end,
+		HasMore:    end < total,
 	}, nil
 }
 

@@ -155,6 +155,32 @@ func TestSaveAndLoadPersistsTLSFieldsAndProtectedToken(t *testing.T) {
 	}
 }
 
+func TestLoadByIDRestoresAllConnectionOptions(t *testing.T) {
+	manager := NewManagerWithStore(&memoryTokenStore{})
+	if err := manager.Open(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+	want := Session{Name: "secure", Host: "agent.local", Port: 9443, AuthToken: "not-for-ui", TLS: true, CAFile: "ca.pem", ServerName: "agent.internal"}
+	id, err := manager.Save(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := manager.LoadByID(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != id || got.AuthToken != want.AuthToken || !got.TLS || got.CAFile != want.CAFile || got.ServerName != want.ServerName {
+		t.Fatalf("loaded session = %#v", got)
+	}
+	if err := manager.UpdateLastConnected(id); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.UpdateLastConnected(id + 1); err == nil {
+		t.Fatal("updating missing session unexpectedly succeeded")
+	}
+}
+
 func TestLoadAllMigratesLegacyRowsAfterClosingTheCursor(t *testing.T) {
 	dir := t.TempDir()
 	createLegacyDatabase(t, dir)

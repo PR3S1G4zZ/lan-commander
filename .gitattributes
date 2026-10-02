@@ -1,0 +1,3 @@
+# Los scripts de shell deben llegar con finales de linea LF a cualquier checkout
+# (incluidos los runners de Windows), o bash falla con "\r: command not found".
+*.sh text eol=lf

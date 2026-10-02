@@ -301,3 +301,43 @@ func TestUploadCancelsRemoteTemporaryAfterAChunkFailure(t *testing.T) {
 		t.Fatalf("cleanup payload = %#v", canceled)
 	}
 }
+
+// cancelAfterFirstRequest cancels the transfer context once the first request
+// has been answered, simulating app shutdown in the middle of an upload.
+type cancelAfterFirstRequest struct {
+	*fakeRequester
+	cancel context.CancelFunc
+}
+
+func (c *cancelAfterFirstRequest) SendRequest(agentID string, msgType string, payload interface{}, timeout time.Duration) (*protocol.Message, error) {
+	response, err := c.fakeRequester.SendRequest(agentID, msgType, payload, timeout)
+	if len(c.fakeRequester.requests) == 1 {
+		c.cancel()
+	}
+	return response, err
+}
+
+func TestUploadCancelsRemoteTemporaryWhenContextIsCancelledMidTransfer(t *testing.T) {
+	localPath := filepath.Join(t.TempDir(), "upload.bin")
+	if err := os.WriteFile(localPath, bytes.Repeat([]byte("x"), DefaultChunkSize+1), 0600); err != nil {
+		t.Fatalf("create upload source: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fake := &cancelAfterFirstRequest{
+		fakeRequester: &fakeRequester{responses: []protocol.Message{
+			{Type: protocol.MsgFileAck, Payload: map[string]any{"offset": 0, "final": false}},
+			{Type: protocol.MsgFileAck, Payload: map[string]any{"committed": false, "canceled": true}},
+		}},
+		cancel: cancel,
+	}
+
+	if err := Upload(ctx, fake, "agent-1", localPath, "/remote/upload.bin", time.Second); err == nil {
+		t.Fatal("Upload() succeeded although its context was cancelled")
+	}
+	requests := fake.fakeRequester.requests
+	if len(requests) != 2 || requests[1].msgType != "cancel_file" {
+		t.Fatalf("requests = %#v, want a data chunk followed by cancel_file so no .part file is left on the agent", requests)
+	}
+}

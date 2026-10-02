@@ -21,6 +21,11 @@
 # Restringir el firewall a la IP del equipo administrador (recomendado):
 #   sudo ./install-agent.sh --allow-from 192.168.1.10
 #
+# El token se guarda en /etc/lan-commander/agent.token (modo 600, solo root) y el
+# servicio lo lee con --auth-token-file, de modo que no aparece en la unidad
+# systemd ni en /proc/<pid>/cmdline. El registro local de auditoria queda en
+# /var/log/lan-commander/audit.log.
+#
 # Instalar SIN autenticacion (inseguro, solo para pruebas en red aislada):
 #   sudo ./install-agent.sh --no-auth
 #
@@ -36,9 +41,14 @@ MANAGED_BY_NOTICE=""
 NO_AUTH=0
 UNINSTALL=0
 GENERATED_TOKEN=0
+REUSED_TOKEN=0
 INSTALL_DIR="/usr/local/bin"
 BIN_NAME="lan-agent"
 SRC_BIN="lan-agent-linux"
+CONFIG_DIR="/etc/lan-commander"
+TOKEN_FILE="${CONFIG_DIR}/agent.token"
+AUDIT_DIR="/var/log/lan-commander"
+AUDIT_FILE="${AUDIT_DIR}/audit.log"
 FIREWALL_STATE_DIR="/var/lib/lan-commander"
 FIREWALL_STATE_FILE="${FIREWALL_STATE_DIR}/firewall-rule"
 FIREWALL_RULE_COMMENT="LAN Commander Agent (lan-commander)"
@@ -271,7 +281,13 @@ if [[ "${UNINSTALL}" -eq 1 ]]; then
 	fi
 	rm -f "${DEST}"
 	rm -f /etc/xdg/autostart/lan-commander-ui.desktop
+	# El token se elimina; el registro de auditoria se conserva como evidencia.
+	rm -f "${TOKEN_FILE}"
+	rmdir "${CONFIG_DIR}" 2>/dev/null || true
 	echo "Agente desinstalado."
+	if [[ -f "${AUDIT_FILE}" ]]; then
+		echo "  Se conserva el registro de auditoria en ${AUDIT_DIR} (borralo a mano si ya no lo necesitas)."
+	fi
 	exit 0
 fi
 
@@ -286,6 +302,11 @@ if [[ "${NO_AUTH}" -eq 1 ]]; then
 	echo "  Cualquier equipo de la red podra ejecutar comandos como root aqui."
 	echo ""
 	AUTH_TOKEN=""
+elif [[ -z "${AUTH_TOKEN}" && -s "${TOKEN_FILE}" ]]; then
+	# Reinstalacion o actualizacion: se conserva el token existente para no
+	# invalidar las sesiones ya guardadas en el Control Center.
+	AUTH_TOKEN="$(tr -d '\r\n' < "${TOKEN_FILE}")"
+	REUSED_TOKEN=1
 elif [[ -z "${AUTH_TOKEN}" ]]; then
 	if command -v openssl >/dev/null 2>&1; then
 		AUTH_TOKEN="$(openssl rand -base64 24 | tr '+/' '-_' | tr -d '=')"
@@ -300,7 +321,26 @@ if [[ ! -f "${SCRIPT_DIR}/${SRC_BIN}" ]]; then
 	exit 1
 fi
 
+# Parar el servicio anterior (si existe) antes de reemplazar el binario.
+if [[ -x "${DEST}" ]]; then
+	"${DEST}" stop >/dev/null 2>&1 || true
+	"${DEST}" uninstall >/dev/null 2>&1 || true
+fi
+
 install -m 755 "${SCRIPT_DIR}/${SRC_BIN}" "${DEST}"
+
+# El token va en un archivo accesible solo por root, no en los argumentos del
+# servicio (que quedarian visibles en la unidad systemd y en /proc).
+install -d -m 700 "${CONFIG_DIR}" "${AUDIT_DIR}"
+if [[ -n "${AUTH_TOKEN}" ]]; then
+	TOKEN_TMP="${TOKEN_FILE}.$$"
+	( umask 077; printf '%s\n' "${AUTH_TOKEN}" > "${TOKEN_TMP}" )
+	chmod 600 "${TOKEN_TMP}"
+	mv -f "${TOKEN_TMP}" "${TOKEN_FILE}"
+	echo "  Token guardado en ${TOKEN_FILE} (solo root)"
+else
+	rm -f "${TOKEN_FILE}"
+fi
 # Registrar la interfaz visual para sesiones gráficas XDG. El servicio systemd
 # continúa siendo un proceso separado y privilegiado.
 UI_EXEC="${DEST} --ui --port ${PORT}"
@@ -323,13 +363,9 @@ echo "  Interfaz visual registrada para iniciar sesion"
 # Firewall (best-effort segun lo que haya instalado)
 configure_firewall
 
-# Si ya habia una instalacion previa, la reinstalamos limpio para tomar los nuevos parametros
-"${DEST}" stop >/dev/null 2>&1 || true
-"${DEST}" uninstall >/dev/null 2>&1 || true
-
-INSTALL_ARGS=(install --port "${PORT}")
+INSTALL_ARGS=(install --port "${PORT}" --audit-log "${AUDIT_FILE}")
 if [[ -n "${AUTH_TOKEN}" ]]; then
-	INSTALL_ARGS+=(--auth-token "${AUTH_TOKEN}")
+	INSTALL_ARGS+=(--auth-token-file "${TOKEN_FILE}")
 elif [[ "${NO_AUTH}" -eq 1 ]]; then
 	INSTALL_ARGS+=(--no-auth)
 fi
@@ -352,6 +388,9 @@ if [[ "${GENERATED_TOKEN}" -eq 1 ]]; then
 	echo " Cargalo en el Control Center al agregar este equipo. Sin el token"
 	echo " el agente rechaza cualquier conexion."
 	echo "====================================================================="
+elif [[ "${REUSED_TOKEN}" -eq 1 ]]; then
+	echo ""
+	echo "Se conservo el token de la instalacion anterior (no cambia al actualizar)."
 elif [[ "${NO_AUTH}" -eq 0 ]]; then
 	echo ""
 	echo "El agente usa el token que indicaste en --auth-token."

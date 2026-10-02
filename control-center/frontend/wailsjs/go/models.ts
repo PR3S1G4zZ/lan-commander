@@ -162,6 +162,8 @@ export namespace protocol {
 	    path: string;
 	    entries: DirEntry[];
 	    total: number;
+	    next_offset: number;
+	    has_more: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new DirContentsPayload(source);
@@ -172,6 +174,8 @@ export namespace protocol {
 	        this.path = source["path"];
 	        this.entries = this.convertValues(source["entries"], DirEntry);
 	        this.total = source["total"];
+	        this.next_offset = source["next_offset"];
+	        this.has_more = source["has_more"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

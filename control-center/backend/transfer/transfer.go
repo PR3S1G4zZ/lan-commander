@@ -187,6 +187,9 @@ func Upload(ctx context.Context, requester Requester, agentID, localPath, remote
 	transferID := uuid.NewString()
 	sentChunk := false
 	defer func() {
+		// Also clean up when ctx was cancelled (for example on app shutdown):
+		// SendRequest does not depend on ctx and the connection is still open
+		// then, so skipping this would leave the .part file on the agent.
 		if err != nil && sentChunk {
 			_, _ = requester.SendRequest(agentID, cancelFileMessage, cancelFilePayload{
 				Path:       remotePath,
