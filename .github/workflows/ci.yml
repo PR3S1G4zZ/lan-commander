@@ -111,6 +111,7 @@ jobs:
             'scripts/build-all.ps1',
             'scripts/generate-release-manifest.ps1',
             'scripts/verify-release-manifest.ps1',
+            'scripts/test-windows-installer.ps1',
             'installers/windows/install-agent.ps1'
           )
           foreach ($file in $files) {
@@ -126,10 +127,18 @@ jobs:
             }
           }
 
-      - name: Check Linux installer syntax
+      - name: Check shell script syntax
         shell: pwsh
         run: |
-          & 'C:\Program Files\Git\bin\bash.exe' -n installers/linux/install-agent.sh
+          foreach ($script in @('installers/linux/install-agent.sh', 'scripts/build-appimage.sh', 'scripts/check-version.sh', 'scripts/smoke-agent.sh')) {
+            & 'C:\Program Files\Git\bin\bash.exe' -n $script
+            if ($LASTEXITCODE -ne 0) { throw "Shell syntax check failed: $script" }
+          }
+
+      - name: Declared versions agree
+        shell: pwsh
+        run: |
+          & 'C:\Program Files\Git\bin\bash.exe' scripts/check-version.sh
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   release-build:

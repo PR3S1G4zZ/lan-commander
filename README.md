@@ -205,7 +205,7 @@ flowchart TD
 |---|---|---|
 | Control Center | Go 1.25+ | Backend, sesiones, auditoria y operaciones |
 | Escritorio | Wails v2.13 | Empaquetado de Go con WebView2 en Windows |
-| Frontend | Svelte 5, TypeScript, Vite 8 | Interfaz del Control Center |
+| Frontend | Svelte 5, TypeScript, Vite 7 | Interfaz del Control Center |
 | Estilos | Tailwind CSS 4 | Estilos del frontend |
 | Agente | Go 1.26+ | Servicio multiplataforma |
 | Comunicacion | WebSocket sobre TCP | Operaciones remotas y eventos |
@@ -243,10 +243,11 @@ Los scripts esperan encontrar el binario correspondiente en la misma carpeta:
 ```
 
 5. El instalador:
-   - Genera un token aleatorio si no proporcionas uno.
+   - Genera un token aleatorio si no proporcionas uno; si ya habia una instalacion, conserva su token.
+   - Guarda el token en `%ProgramData%\LAN Commander Agent\agent.token` (solo SYSTEM y Administradores). El servicio lo lee con `--auth-token-file`, asi que no queda en los argumentos del servicio ni en el registro.
    - Copia el agente a `Program Files\LAN Commander Agent`.
-   - Registra el servicio `LANCommanderAgent`.
-   - Abre el puerto TCP en el Firewall de Windows.
+   - Registra el servicio `LANCommanderAgent` con auditoria local en `%ProgramData%\LAN Commander Agent\audit.log`.
+   - Abre el puerto TCP en el Firewall de Windows, solo en los perfiles Dominio y Privado (usa `-FirewallProfile Domain,Private,Public` para incluir redes publicas).
    - Registra la interfaz visual para iniciar sesion.
    - Muestra el token una sola vez al terminar.
 6. Guarda el token y usalo al agregar el equipo en el Control Center.
@@ -284,7 +285,8 @@ sudo ./install-agent.sh --managed-by-notice "Nombre de la organizacion"
 
 6. El instalador:
    - Copia el binario a `/usr/local/bin/lan-agent`.
-   - Registra el servicio `LANCommanderAgent`.
+   - Guarda el token en `/etc/lan-commander/agent.token` (modo 600, solo root) y lo conserva al reinstalar. El servicio lo lee con `--auth-token-file`, asi que no aparece en la unidad systemd ni en `/proc`.
+   - Registra el servicio `LANCommanderAgent` con auditoria local en `/var/log/lan-commander/audit.log`.
    - Configura ufw o firewalld si estan disponibles.
    - Registra `/etc/xdg/autostart/lan-commander-ui.desktop`.
    - Muestra el token generado.
@@ -440,7 +442,10 @@ go vet ./...
 
 ### Protecciones actuales
 
-- Los instaladores generan token automaticamente.
+- Los instaladores generan token automaticamente y lo guardan en un archivo de acceso restringido, fuera de los argumentos del servicio.
+- El agente limita las conexiones simultaneas por IP (16), bloquea durante un minuto a la IP que acumula 20 autenticaciones fallidas por minuto, y cierra las conexiones que no se autentican en 15 segundos.
+- El agente mantiene su propia auditoria local (`--audit-log`, JSON por linea, rotacion a 5 MB) con autenticaciones, comandos, listados, transferencias y capturas, independiente de la del Control Center.
+- Si un cliente no lee sus respuestas y la cola de envio se llena, el agente cierra esa conexion en lugar de descartar mensajes en silencio.
 - El agente puede restringir el firewall por IP mediante `AllowFrom` o `--allow-from`.
 - La interfaz visual solo escucha en `127.0.0.1`.
 - Las descargas se escriben en un archivo temporal y se renombran atomicamente despues de validar checksum.
@@ -448,7 +453,9 @@ go vet ./...
 
 ### Limitaciones conocidas
 
-- El trafico no usa TLS por defecto.
+- El trafico no usa TLS por defecto, y los instaladores no configuran certificados.
+- El campo `user` de la auditoria local es el nombre que declara el cliente al autenticarse; no esta verificado (el token es compartido, no hay identidad por operador).
+- No hay rotacion automatica de tokens.
 - La conexion TLS debe habilitarse manualmente desde el dialogo de conexion; el agente debe tener un certificado y una clave validos.
 - En Windows, los tokens guardados se protegen con DPAPI. En plataformas sin almacén seguro nativo, el guardado de sesiones con token falla de forma segura.
 - `--no-auth` elimina la proteccion del agente y no debe usarse en produccion.

@@ -1,0 +1,78 @@
+name: Release
+
+# Se ejecuta al subir una etiqueta de version (por ejemplo v1.1.0). Reutiliza el
+# workflow "Packages": solo se publica si TODAS sus verificaciones pasan, y lo
+# publicado es exactamente lo que se construyo y probo.
+#
+#   git tag -a v1.1.0 -m "LAN Commander v1.1.0"
+#   git push origin v1.1.0
+#
+# Requiere docs/releases/<etiqueta>.md con las notas de la version.
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-*"
+
+permissions:
+  contents: read
+
+jobs:
+  packages:
+    name: Build and verify packages
+    uses: ./.github/workflows/packages.yml
+
+  publish:
+    name: Publish GitHub release
+    runs-on: ubuntu-latest
+    needs: packages
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: The tag must match the version declared in the code
+        run: bash scripts/check-version.sh "$TAG"
+
+      - name: The release notes must exist
+        run: test -s "docs/releases/${TAG}.md" || { echo "Missing docs/releases/${TAG}.md" >&2; exit 1; }
+
+      - name: Download every verified package
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect release files and checksums
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name '*.exe' -o -name '*.AppImage' -o -name '*.zip' -o -name '*.tar.gz' \) -exec cp {} release/ \;
+          expected=7
+          count=$(find release -type f | wc -l)
+          if [ "$count" -ne "$expected" ]; then
+            echo "Expected $expected release files but found $count:" >&2
+            ls -l release >&2
+            exit 1
+          fi
+          (cd release && sha256sum * > SHA256SUMS.txt)
+          ls -l release
+          cat release/SHA256SUMS.txt
+
+      - name: Create the release
+        run: |
+          flags=()
+          case "$TAG" in *-*) flags+=(--prerelease) ;; esac
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" release/* --clobber
+            gh release edit "$TAG" --title "LAN Commander $TAG" --notes-file "docs/releases/${TAG}.md" "${flags[@]}"
+          else
+            gh release create "$TAG" release/* \
+              --title "LAN Commander $TAG" \
+              --notes-file "docs/releases/${TAG}.md" \
+              --verify-tag \
+              "${flags[@]}"
+          fi
