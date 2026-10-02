@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -293,7 +294,11 @@ func (m *Manager) ConnectWithOptions(host string, port int, options ConnectOptio
 	for _, ac := range m.agents {
 		info := ac.snapshot()
 		if info.Host == host && info.Port == port && info.Connected {
+			_, _, _, existingOptions := ac.connectionDetails()
 			m.mu.RUnlock()
+			if !sameConnectOptions(existingOptions, options) {
+				return "", fmt.Errorf("agent at %s:%d is already connected with different TLS or authentication options", host, port)
+			}
 			return info.ID, nil
 		}
 	}
@@ -351,8 +356,12 @@ func (m *Manager) ConnectWithOptions(host string, port int, options ConnectOptio
 	for _, existing := range m.agents {
 		existingInfo := existing.snapshot()
 		if existingInfo.Host == host && existingInfo.Port == port && existingInfo.Connected {
+			_, _, _, existingOptions := existing.connectionDetails()
 			m.mu.Unlock()
 			conn.Close()
+			if !sameConnectOptions(existingOptions, options) {
+				return "", fmt.Errorf("agent at %s:%d is already connected with different TLS or authentication options", host, port)
+			}
 			return existingInfo.ID, nil
 		}
 	}
@@ -372,6 +381,11 @@ func (m *Manager) ConnectWithOptions(host string, port int, options ConnectOptio
 
 	log.Printf("client: connected to agent %s at %s:%d", agentID, host, port)
 	return agentID, nil
+}
+
+func sameConnectOptions(a, b ConnectOptions) bool {
+	tokenMatches := len(a.AuthToken) == len(b.AuthToken) && subtle.ConstantTimeCompare([]byte(a.AuthToken), []byte(b.AuthToken)) == 1
+	return tokenMatches && a.tlsEnabled() == b.tlsEnabled() && a.CAFile == b.CAFile && a.ServerName == b.ServerName
 }
 
 func websocketURL(host string, port int, options ConnectOptions) url.URL {

@@ -6,6 +6,13 @@
   "frontend:build": "npm run build",
   "frontend:dev:watcher": "npm run dev",
   "frontend:dev:serverUrl": "auto",
+  "info": {
+    "companyName": "LAN Commander",
+    "productName": "LAN Commander",
+    "productVersion": "1.1.0",
+    "copyright": "LAN Commander",
+    "comments": "Remote administration for a local network"
+  },
   "author": {
     "name": "",
     "email": ""

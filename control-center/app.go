@@ -11,8 +11,10 @@ import (
 	"sync"
 	"time"
 
+	"control-center/backend/appinfo"
 	"control-center/backend/audit"
 	"control-center/backend/client"
+	"control-center/backend/dbbackup"
 	"control-center/backend/discovery"
 	"control-center/backend/protocol"
 	"control-center/backend/scripting"
@@ -30,15 +32,20 @@ const (
 
 // App is the main application structure for Wails.
 type App struct {
-	ctx       context.Context
-	clientMgr *client.Manager
-	discover  *discovery.Discovery
-	sessions  *session.Manager
-	audit     *audit.Logger
-	scripts   *scripting.Engine
-	wolSender *wol.Sender
-	dataDir   string
-	mu        sync.Mutex
+	ctx            context.Context
+	clientMgr      *client.Manager
+	discover       *discovery.Discovery
+	sessions       *session.Manager
+	audit          *audit.Logger
+	scripts        *scripting.Engine
+	wolSender      *wol.Sender
+	dataDir        string
+	mu             sync.Mutex
+	transferMu     sync.Mutex
+	transferCtx    context.Context
+	transferCancel context.CancelFunc
+	transferWG     sync.WaitGroup
+	shuttingDown   bool
 }
 
 // NewApp creates a new App application struct.
@@ -72,12 +79,24 @@ func resolveDataDir() string {
 // startup is called when the app starts. It initializes all services.
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
+	a.transferCtx, a.transferCancel = context.WithCancel(ctx)
 
 	// Determine data directory. We deliberately avoid the executable's own
 	// directory: when installed under Program Files it is not writable by a
 	// non-elevated process, which silently broke session/audit persistence.
 	a.dataDir = resolveDataDir()
 	log.Printf("app: data directory: %s", a.dataDir)
+
+	// Snapshot the databases the first time this version runs, before any
+	// schema migration touches them, so an upgrade can be rolled back.
+	for _, name := range []string{"lan-commander.db", "audit.db"} {
+		backup, err := dbbackup.BackupBeforeUpgrade(filepath.Join(a.dataDir, name), appinfo.Version)
+		if err != nil {
+			log.Printf("app: cannot back up %s before upgrade: %v", name, err)
+		} else if backup != "" {
+			log.Printf("app: backed up %s to %s", name, backup)
+		}
+	}
 
 	// Initialize session manager (SQLite)
 	a.sessions = session.NewManager()
@@ -104,6 +123,9 @@ func (a *App) startup(ctx context.Context) {
 
 	// Initialize discovery (mDNS)
 	a.discover = discovery.NewDiscovery(a.onAgentDiscovered)
+
+	// Start discovery independently so slow session restoration cannot suppress mDNS.
+	a.discover.Start()
 
 	// Restore previous sessions and reconnect in background
 	go func() {
@@ -138,8 +160,6 @@ func (a *App) startup(ctx context.Context) {
 			}(agentID)
 		}
 
-		// Start mDNS discovery
-		a.discover.Start()
 	}()
 
 	log.Printf("%s started successfully", appName)
@@ -148,6 +168,13 @@ func (a *App) startup(ctx context.Context) {
 // shutdown is called when the app is closing.
 func (a *App) shutdown(ctx context.Context) {
 	log.Printf("app: shutting down...")
+	a.transferMu.Lock()
+	a.shuttingDown = true
+	if a.transferCancel != nil {
+		a.transferCancel()
+	}
+	a.transferMu.Unlock()
+	a.transferWG.Wait()
 
 	if a.discover != nil {
 		a.discover.Stop()
@@ -243,13 +270,24 @@ func (a *App) onAgentMessage(agentID string, msg *protocol.Message) {
 // --- Binding: GetAgents ---
 
 // GetAgents returns information about all known (connected and disconnected) agents.
+//
+// It deliberately does not take a.mu: the frontend polls this every couple of
+// seconds, and connect/reconnect hold a.mu for the whole dial and handshake, so
+// sharing the lock froze the UI while an unreachable host timed out. The
+// manager guards its own state.
 func (a *App) GetAgents() []client.AgentInfo {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	return redactAgentTokens(a.clientMgr.ListAgents())
+}
 
-	agents := a.clientMgr.ListAgents()
+// redactAgentTokens returns the agents without their authentication tokens, so
+// the secret never crosses the Wails bridge into the renderer. The slice
+// elements are copies owned by the caller.
+func redactAgentTokens(agents []client.AgentInfo) []client.AgentInfo {
 	if agents == nil {
 		return []client.AgentInfo{}
+	}
+	for i := range agents {
+		agents[i].AuthToken = ""
 	}
 	return agents
 }
@@ -330,6 +368,34 @@ func (a *App) DisconnectAgent(agentID string) error {
 
 	a.audit.Log("disconnect", agentID, "user", "Disconnected from agent", audit.StatusSuccess)
 	return nil
+}
+
+// ReconnectSession reconnects a saved session and returns the connected agent ID.
+func (a *App) ReconnectSession(id int64) (string, error) {
+	if id <= 0 {
+		err := fmt.Errorf("invalid session ID: %d", id)
+		a.audit.Log("reconnect_session", "", "user", err.Error(), audit.StatusError)
+		return "", err
+	}
+	saved, err := a.sessions.LoadByID(id)
+	if err != nil {
+		a.audit.Log("reconnect_session", "", "user", fmt.Sprintf("Failed to load session %d: %v", id, err), audit.StatusError)
+		return "", fmt.Errorf("failed to load session: %w", err)
+	}
+	options := client.ConnectOptions{AuthToken: saved.AuthToken, TLS: saved.TLS, CAFile: saved.CAFile, ServerName: saved.ServerName}
+	a.mu.Lock()
+	agentID, err := a.clientMgr.ConnectWithOptions(saved.Host, saved.Port, options)
+	a.mu.Unlock()
+	if err != nil {
+		a.audit.Log("reconnect_session", "", "user", fmt.Sprintf("Failed to reconnect session %d at %s:%d: %v", id, saved.Host, saved.Port, err), audit.StatusError)
+		return "", fmt.Errorf("failed to reconnect session: %w", err)
+	}
+	if err := a.sessions.UpdateLastConnected(id); err != nil {
+		a.audit.Log("reconnect_session", agentID, "user", fmt.Sprintf("Connected but failed to update session %d: %v", id, err), audit.StatusError)
+		return agentID, fmt.Errorf("connected to agent but failed to update session: %w", err)
+	}
+	a.audit.Log("reconnect_session", agentID, "user", fmt.Sprintf("Reconnected session %d to %s:%d", id, saved.Host, saved.Port), audit.StatusSuccess)
+	return agentID, nil
 }
 
 // --- Binding: ExecCommand ---
@@ -440,6 +506,15 @@ func (a *App) ExecCommandMulti(agentIDs []string, command string, timeout int) m
 
 // --- Binding: ListDir ---
 
+// Directory listings are fetched in pages so large folders are not cut off at
+// the agent's per-page limit. maxListedEntries bounds what reaches the UI; the
+// real size stays in Total so the interface can say the list is partial.
+const (
+	listDirPageSize   = 500
+	maxListedEntries  = 5000
+	maxListDirRequest = maxListedEntries/listDirPageSize + 2
+)
+
 // ListDir lists the contents of a directory on an agent.
 func (a *App) ListDir(agentID string, path string) (*protocol.DirContentsPayload, error) {
 	if agentID == "" {
@@ -449,16 +524,47 @@ func (a *App) ListDir(agentID string, path string) (*protocol.DirContentsPayload
 		return nil, fmt.Errorf("path cannot be empty")
 	}
 
-	a.audit.Log("list_dir", agentID, "user", fmt.Sprintf("Path: %s", path), audit.StatusSuccess)
-
-	var result protocol.DirContentsPayload
-	err := a.clientMgr.SendAndParse(agentID, protocol.MsgListDir, protocol.ListDirPayload{Path: path}, &result, defaultTimeout)
+	result, err := a.listDirPages(agentID, path)
 	if err != nil {
 		a.audit.Log("list_dir", agentID, "user", fmt.Sprintf("Failed: %v", err), audit.StatusError)
 		return nil, fmt.Errorf("failed to list directory: %w", err)
 	}
+	a.audit.Log("list_dir", agentID, "user", fmt.Sprintf("Path: %s", path), audit.StatusSuccess)
 
-	return &result, nil
+	return result, nil
+}
+
+// listDirPages requests consecutive pages until the directory is exhausted or
+// maxListedEntries is reached. Agents that predate pagination answer with one
+// page and no has_more flag, which ends the loop after the first request.
+func (a *App) listDirPages(agentID, path string) (*protocol.DirContentsPayload, error) {
+	var merged *protocol.DirContentsPayload
+	offset := 0
+	for request := 0; request < maxListDirRequest; request++ {
+		var page protocol.DirContentsPayload
+		err := a.clientMgr.SendAndParse(agentID, protocol.MsgListDir,
+			protocol.ListDirPayload{Path: path, Offset: offset, Limit: listDirPageSize}, &page, defaultTimeout)
+		if err != nil {
+			return nil, err
+		}
+		if merged == nil {
+			merged = &page
+		} else {
+			merged.Entries = append(merged.Entries, page.Entries...)
+			merged.Total = page.Total
+			merged.NextOffset = page.NextOffset
+			merged.HasMore = page.HasMore
+		}
+		// A non-advancing offset would loop forever on a misbehaving agent.
+		if !page.HasMore || page.NextOffset <= offset || len(merged.Entries) >= maxListedEntries {
+			break
+		}
+		offset = page.NextOffset
+	}
+	if merged.Total < len(merged.Entries) {
+		merged.Total = len(merged.Entries)
+	}
+	return merged, nil
 }
 
 // --- Binding: GetSystemInfo ---
@@ -469,13 +575,12 @@ func (a *App) GetSystemInfo(agentID string) (*protocol.SystemInfoPayload, error)
 		return nil, fmt.Errorf("agent ID cannot be empty")
 	}
 
-	a.audit.Log("system_info", agentID, "user", "Requesting system info", audit.StatusSuccess)
-
 	result, err := a.requestSystemInfo(agentID)
 	if err != nil {
 		a.audit.Log("system_info", agentID, "user", fmt.Sprintf("Failed: %v", err), audit.StatusError)
 		return nil, fmt.Errorf("failed to get system info: %w", err)
 	}
+	a.audit.Log("system_info", agentID, "user", "Retrieved system info", audit.StatusSuccess)
 
 	return result, nil
 }
@@ -488,14 +593,13 @@ func (a *App) RequestScreenshot(agentID string) (*protocol.ScreenshotDataPayload
 		return nil, fmt.Errorf("agent ID cannot be empty")
 	}
 
-	a.audit.Log("screenshot", agentID, "user", "Requesting screenshot", audit.StatusSuccess)
-
 	var result protocol.ScreenshotDataPayload
 	err := a.clientMgr.SendAndParse(agentID, protocol.MsgScreenshot, struct{}{}, &result, defaultTimeout)
 	if err != nil {
 		a.audit.Log("screenshot", agentID, "user", fmt.Sprintf("Failed: %v", err), audit.StatusError)
 		return nil, fmt.Errorf("failed to request screenshot: %w", err)
 	}
+	a.audit.Log("screenshot", agentID, "user", "Screenshot captured", audit.StatusSuccess)
 
 	return &result, nil
 }
@@ -515,7 +619,12 @@ func (a *App) TransferFile(agentID string, remotePath string, localPath string) 
 	if localPath == "" {
 		return fmt.Errorf("local path cannot be empty")
 	}
-	if err := transfer.Download(context.Background(), a.clientMgr, agentID, remotePath, localPath, defaultTimeout); err != nil {
+	ctx, done, err := a.beginTransfer()
+	if err != nil {
+		return err
+	}
+	defer done()
+	if err := transfer.Download(ctx, a.clientMgr, agentID, remotePath, localPath, defaultTimeout); err != nil {
 		if a.audit != nil {
 			a.audit.Log("transfer_download", agentID, "user", fmt.Sprintf("Remote: %s -> Local: %s; failed: %v", remotePath, localPath, err), audit.StatusError)
 		}
@@ -539,7 +648,12 @@ func (a *App) UploadFileFromPath(agentID string, localPath string, remotePath st
 	if remotePath == "" {
 		return fmt.Errorf("remote path cannot be empty")
 	}
-	if err := transfer.Upload(context.Background(), a.clientMgr, agentID, localPath, remotePath, defaultTimeout); err != nil {
+	ctx, done, err := a.beginTransfer()
+	if err != nil {
+		return err
+	}
+	defer done()
+	if err := transfer.Upload(ctx, a.clientMgr, agentID, localPath, remotePath, defaultTimeout); err != nil {
 		if a.audit != nil {
 			a.audit.Log("transfer_upload", agentID, "user", fmt.Sprintf("Local: %s -> Remote: %s; failed: %v", localPath, remotePath, err), audit.StatusError)
 		}
@@ -549,6 +663,16 @@ func (a *App) UploadFileFromPath(agentID string, localPath string, remotePath st
 		a.audit.Log("transfer_upload", agentID, "user", fmt.Sprintf("Local: %s -> Remote: %s", localPath, remotePath), audit.StatusSuccess)
 	}
 	return nil
+}
+
+func (a *App) beginTransfer() (context.Context, func(), error) {
+	a.transferMu.Lock()
+	defer a.transferMu.Unlock()
+	if a.shuttingDown || a.transferCtx == nil || a.transferCtx.Err() != nil {
+		return nil, nil, fmt.Errorf("application is shutting down")
+	}
+	a.transferWG.Add(1)
+	return a.transferCtx, a.transferWG.Done, nil
 }
 
 // DownloadFile opens the native save dialog and downloads the selected remote file.
@@ -622,12 +746,11 @@ func (a *App) WakeOnLAN(macAddr string, broadcastIP string) error {
 		return fmt.Errorf("invalid MAC address format: %s", macAddr)
 	}
 
-	a.audit.Log("wol", "", "user", fmt.Sprintf("Sending WOL to MAC: %s via %s", macAddr, broadcastIP), audit.StatusSuccess)
-
 	if err := a.wolSender.Send(macAddr, broadcastIP); err != nil {
 		a.audit.Log("wol", "", "user", fmt.Sprintf("Failed: %v", err), audit.StatusError)
 		return fmt.Errorf("failed to send WOL packet: %w", err)
 	}
+	a.audit.Log("wol", "", "user", fmt.Sprintf("Sent WOL to MAC: %s via %s", macAddr, broadcastIP), audit.StatusSuccess)
 
 	return nil
 }
@@ -692,12 +815,16 @@ func (a *App) DeleteSession(id int64) error {
 
 // --- Binding: GetSessions ---
 
-// GetSessions returns all saved sessions.
+// GetSessions returns saved session metadata without exposing authentication
+// tokens to the Wails renderer.
 func (a *App) GetSessions() []session.Session {
 	sessions, err := a.sessions.LoadAll()
 	if err != nil {
 		log.Printf("app: failed to load sessions: %v", err)
 		return []session.Session{}
+	}
+	for i := range sessions {
+		sessions[i].AuthToken = ""
 	}
 	return sessions
 }
@@ -720,6 +847,7 @@ func (a *App) RunScript(agentID string, scriptName string, scriptContent string)
 		// Load saved script
 		script, err = a.scripts.Get(scriptName)
 		if err != nil {
+			a.audit.Log("run_script", agentID, "user", fmt.Sprintf("Script lookup failed: %v", err), audit.StatusError)
 			return nil, fmt.Errorf("script not found: %w", err)
 		}
 	} else {
@@ -729,8 +857,6 @@ func (a *App) RunScript(agentID string, scriptName string, scriptContent string)
 			Content: scriptContent,
 		}
 	}
-
-	a.audit.Log("run_script", agentID, "user", fmt.Sprintf("Script: %s", script.Name), audit.StatusSuccess)
 
 	// Get available vars from the agent info
 	vars := map[string]string{
@@ -787,6 +913,11 @@ func (a *App) RunScript(agentID string, scriptName string, scriptContent string)
 		Stderr:   combinedStderr,
 		ExitCode: scriptResult.FailedCount,
 	}
+	status := audit.StatusSuccess
+	if scriptResult.FailedCount > 0 {
+		status = audit.StatusError
+	}
+	a.audit.Log("run_script", agentID, "user", fmt.Sprintf("Script: %s (%d succeeded, %d failed)", script.Name, scriptResult.SuccessCount, scriptResult.FailedCount), status)
 
 	return finalResult, nil
 }

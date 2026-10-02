@@ -30,6 +30,12 @@ Unicode true
 ####
 ## !define REQUEST_EXECUTION_LEVEL "admin"            # Default "admin"  see also https://nsis.sourceforge.io/Docs/Chapter4.html
 ####
+## LAN Commander: stable identifiers. They must not change between releases, or
+## an upgrade would no longer find (and replace) the previous installation.
+####
+!define PRODUCT_EXECUTABLE "lan-commander.exe"
+!define UNINST_KEY_NAME    "LANCommander"
+
 ## Include the wails tools
 ####
 !include "wails_tools.nsh"
@@ -76,10 +82,10 @@ OutFile "..\..\bin\${INFO_PROJECTNAME}-${ARCH}-installer.exe" # Name of the inst
   !if "${WAILS_INSTALL_SCOPE}" == "user"
     InstallDir "$LOCALAPPDATA\Programs\${INFO_PRODUCTNAME}"
   !else
-    InstallDir "$PROGRAMFILES64\${INFO_COMPANYNAME}\${INFO_PRODUCTNAME}"
+    InstallDir "$PROGRAMFILES64\${INFO_PRODUCTNAME}"
   !endif
 !else
-  InstallDir "$PROGRAMFILES64\${INFO_COMPANYNAME}\${INFO_PRODUCTNAME}"
+  InstallDir "$PROGRAMFILES64\${INFO_PRODUCTNAME}"
 !endif # Default installing folder ($PROGRAMFILES is Program Files folder).
 ShowInstDetails show # This will always show the installation details.
 
@@ -107,6 +113,10 @@ SectionEnd
 
 Section "uninstall"
     !insertmacro wails.setShellContext
+
+    # User data (sessions, audit log, scripts) lives in %APPDATA%\LAN Commander,
+    # outside $INSTDIR, and is deliberately NOT removed: uninstalling or upgrading
+    # must never delete it.
 
     RMDir /r "$AppData\${PRODUCT_EXECUTABLE}" # Remove the WebView2 DataPath
 

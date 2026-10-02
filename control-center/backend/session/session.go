@@ -339,6 +339,32 @@ func (m *Manager) LoadByHost(host string, port int) (*Session, error) {
 	return &s, nil
 }
 
+// LoadByID loads one saved session and restores its protected authentication token.
+func (m *Manager) LoadByID(id int64) (*Session, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.db == nil {
+		return nil, fmt.Errorf("database not open")
+	}
+	var s Session
+	var protectedToken string
+	var tlsEnabled int
+	err := m.db.QueryRow("SELECT id, name, host, port, auth_token, auth_token_protected, tls_enabled, ca_file, server_name, created_at, last_connected FROM sessions WHERE id = ?", id).
+		Scan(&s.ID, &s.Name, &s.Host, &s.Port, &s.AuthToken, &protectedToken, &tlsEnabled, &s.CAFile, &s.ServerName, &s.CreatedAt, &s.LastConnected)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("session %d not found", id)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to load session %d: %w", id, err)
+	}
+	s.AuthToken, err = m.restoreToken(s.ID, s.AuthToken, protectedToken)
+	if err != nil {
+		return nil, err
+	}
+	s.TLS = tlsEnabled != 0
+	return &s, nil
+}
+
 func (m *Manager) restoreToken(id int64, plaintext, protected string) (string, error) {
 	if protected != "" {
 		if m.store == nil {
@@ -380,6 +406,16 @@ func (m *Manager) UpdateLastConnected(id int64) error {
 		return fmt.Errorf("database not open")
 	}
 
-	_, err := m.db.Exec("UPDATE sessions SET last_connected = ? WHERE id = ?", time.Now(), id)
-	return err
+	result, err := m.db.Exec("UPDATE sessions SET last_connected = ? WHERE id = ?", time.Now(), id)
+	if err != nil {
+		return fmt.Errorf("failed to update last connected for session %d: %w", id, err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to check session update: %w", err)
+	}
+	if rows == 0 {
+		return fmt.Errorf("session %d not found", id)
+	}
+	return nil
 }
