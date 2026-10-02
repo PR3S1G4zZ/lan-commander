@@ -1,13 +1,26 @@
 <script lang="ts">
+	import { untrack } from 'svelte';
 	import { agents, type CommandResult } from '../stores/agents';
 	import { addNotification } from '../stores/ui';
 	import { execCommandMulti } from '../utils/api';
+	import { getRunnableAgentIds, reconcileSelectedAgentIds } from '../utils/multiExecState';
 	import Icon from './Icon.svelte';
 
 	let command = $state('');
 	let selectedAgentIds = $state<Set<string>>(new Set());
 	let results = $state<Record<string, CommandResult>>({});
 	let running = $state(false);
+	let connectedAgents = $derived($agents.filter(agent => agent.connected));
+	let runnableIds = $derived(getRunnableAgentIds(selectedAgentIds, $agents));
+
+	$effect(() => {
+		const availableAgents = $agents;
+		const currentSelection = untrack(() => selectedAgentIds);
+		const reconciled = reconcileSelectedAgentIds(currentSelection, availableAgents);
+		if (reconciled.size !== currentSelection.size || [...reconciled].some(id => !currentSelection.has(id))) {
+			selectedAgentIds = reconciled;
+		}
+	});
 
 	function toggleAgent(id: string) {
 		const newSet = new Set(selectedAgentIds);
@@ -20,8 +33,8 @@
 
 	async function run() {
 		if (!command.trim() || running) return;
-		const ids = Array.from(selectedAgentIds);
-		if (ids.length === 0) { addNotification('warning', 'Select at least one agent'); return; }
+		const ids = getRunnableAgentIds(selectedAgentIds, $agents);
+		if (ids.length === 0) { selectedAgentIds = new Set(); addNotification('warning', 'Select at least one connected agent'); return; }
 		running = true;
 		results = {};
 		try {
@@ -50,12 +63,12 @@
 		</div>
 		<div class="flex flex-wrap gap-2">
 			{#each $agents.filter(a => a.connected) as agent (agent.id)}
-				<button class="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm transition-all bg-slate-700 text-slate-300 hover:bg-slate-600 cursor-pointer border-none {selectedAgentIds.has(agent.id) ? 'bg-cyan-600/20 text-cyan-300 border border-cyan-500/30' : ''}" onclick={() => toggleAgent(agent.id)}>
+				<button type="button" aria-label={`Select ${agent.name}`} aria-pressed={selectedAgentIds.has(agent.id)} class="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm transition-all bg-slate-700 text-slate-300 hover:bg-slate-600 cursor-pointer border-none {selectedAgentIds.has(agent.id) ? 'bg-cyan-600/20 text-cyan-300 border border-cyan-500/30' : ''}" onclick={() => toggleAgent(agent.id)}>
 					<span class="w-1.5 h-1.5 rounded-full bg-green-500"></span>
 					{agent.name}
 				</button>
 			{/each}
-			{#if $agents.filter(a => a.connected).length === 0}
+			{#if connectedAgents.length === 0}
 				<span class="text-sm text-slate-500">No connected agents</span>
 			{/if}
 		</div>
@@ -63,7 +76,7 @@
 
 	<div class="mb-4 flex gap-2">
 		<input type="text" bind:value={command} placeholder="Enter command..." disabled={running} onkeydown={(e) => e.key === 'Enter' && run()} class="flex-1 bg-slate-800 text-slate-200 rounded-xl px-4 py-3 text-sm font-mono outline-none border border-slate-700 focus:border-cyan-500 box-border" />
-		<button class="flex items-center gap-1.5 px-6 py-3 rounded-xl font-medium bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white disabled:opacity-50 cursor-pointer border-none shadow-lg shadow-cyan-500/10" onclick={run} disabled={running}>
+		<button class="flex items-center gap-1.5 px-6 py-3 rounded-xl font-medium bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white disabled:opacity-50 cursor-pointer border-none shadow-lg shadow-cyan-500/10" onclick={run} disabled={running || !command.trim() || runnableIds.length === 0}>
 			{#if !running}<Icon name="play" size={14} />{/if} {running ? 'Running...' : 'Run'}
 		</button>
 	</div>

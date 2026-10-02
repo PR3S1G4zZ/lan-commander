@@ -5,6 +5,7 @@
  */
 
 import type { AgentInfo } from '../stores/agents';
+import { normalizeSession } from './sessionState';
 
 // We use dynamic imports to safely handle missing bindings during dev
 let App: Record<string, (...args: unknown[]) => Promise<unknown>> = {};
@@ -121,7 +122,10 @@ export async function wakeOnLAN(macAddr: string, broadcastIP: string = '255.255.
 
 // --- Sessions ---
 export async function getSessions() {
-	return callBinding('GetSessions');
+	const raw = (await callBinding('GetSessions')) as Record<string, unknown>[] | null;
+	if (!Array.isArray(raw)) return [];
+	// Do not pass persisted auth tokens into UI state. Reconnection stays backend-owned.
+	return raw.map(normalizeSession);
 }
 
 export async function saveSession(host: string, port: number, name: string, authToken: string = '') {
@@ -141,6 +145,10 @@ export async function saveSessionSecure(
 
 export async function deleteSession(id: number) {
 	return callBinding('DeleteSession', id);
+}
+
+export async function reconnectSession(sessionId: number): Promise<string> {
+	return String(await callBinding('ReconnectSession', sessionId));
 }
 
 // --- Scripts ---

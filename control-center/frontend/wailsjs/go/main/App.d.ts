@@ -32,6 +32,8 @@ export function GetSystemInfo(arg1:string):Promise<protocol.SystemInfoPayload>;
 
 export function ListDir(arg1:string,arg2:string):Promise<protocol.DirContentsPayload>;
 
+export function ReconnectSession(arg1:number):Promise<string>;
+
 export function RequestScreenshot(arg1:string):Promise<protocol.ScreenshotDataPayload>;
 
 export function RunScript(arg1:string,arg2:string,arg3:string):Promise<protocol.CommandResultPayload>;

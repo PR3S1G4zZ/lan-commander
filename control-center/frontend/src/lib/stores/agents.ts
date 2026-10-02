@@ -61,6 +61,8 @@ export interface DirContents {
 	path: string;
 	entries: DirEntry[];
 	total: number;
+	next_offset?: number;
+	has_more?: boolean;
 }
 
 export interface ScreenshotData {
@@ -89,9 +91,11 @@ export interface Session {
 	name: string;
 	host: string;
 	port: number;
-	auth_token: string;
 	created_at: string;
 	last_connected: string;
+	tls: boolean;
+	ca_file: string;
+	server_name: string;
 }
 
 export interface AuditEntry {

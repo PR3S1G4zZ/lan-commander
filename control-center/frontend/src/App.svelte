@@ -129,7 +129,7 @@
 					<span>Backend unavailable: {backendError}</span>
 				</div>
 			{/if}
-			<nav class="flex items-center justify-between px-4 py-2 bg-slate-900/80 border-b border-slate-800 backdrop-blur-sm">
+			<nav aria-label="Main views" class="flex items-center justify-between px-4 py-2 bg-slate-900/80 border-b border-slate-800 backdrop-blur-sm">
 				<div class="flex items-center gap-3">
 					<button aria-label={$sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'} class="flex items-center justify-center text-slate-400 hover:text-slate-200 bg-transparent border-none cursor-pointer p-1 rounded-lg hover:bg-slate-800 transition-colors" onclick={() => $sidebarCollapsed = !$sidebarCollapsed}>
 						<Icon name="menu" size={18} />
@@ -168,6 +168,8 @@
 							onclick={() => $currentView = view.id}
 							title={view.label}
 							aria-label={view.label}
+							aria-current={$currentView === view.id ? 'page' : undefined}
+							aria-pressed={$currentView === view.id}
 						><Icon name={view.icon} size={17} /></button>
 					{/each}
 				</div>

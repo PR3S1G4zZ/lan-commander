@@ -54,6 +54,10 @@ export function ListDir(arg1, arg2) {
   return window['go']['main']['App']['ListDir'](arg1, arg2);
 }
 
+export function ReconnectSession(arg1) {
+  return window['go']['main']['App']['ReconnectSession'](arg1);
+}
+
 export function RequestScreenshot(arg1) {
   return window['go']['main']['App']['RequestScreenshot'](arg1);
 }

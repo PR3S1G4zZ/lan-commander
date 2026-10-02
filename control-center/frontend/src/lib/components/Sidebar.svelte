@@ -67,6 +67,8 @@
 					class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-left text-sm transition-colors cursor-pointer text-slate-300 hover:bg-slate-700/50 border-none"
 					class:bg-slate-700={$selectedAgentId === agent.id}
 					class:text-slate-100={$selectedAgentId === agent.id}
+					aria-label={`Select agent ${agent.name}${agent.connected ? ', connected' : ', disconnected'}`}
+					aria-pressed={$selectedAgentId === agent.id}
 					onclick={() => selectAgent(agent.id)}
 				>
 					<span class="w-2 h-2 rounded-full flex-shrink-0 {getStatusColor(agent)}"></span>
@@ -98,6 +100,8 @@
 					class="w-8 h-8 flex items-center justify-center rounded hover:bg-slate-700 cursor-pointer border-none {$selectedAgentId === agent.id ? 'bg-slate-700 ring-1 ring-cyan-500' : ''}"
 					onclick={() => selectAgent(agent.id)}
 					title={agent.name}
+					aria-label={`Select agent ${agent.name}${agent.connected ? ', connected' : ', disconnected'}`}
+					aria-pressed={$selectedAgentId === agent.id}
 				>
 					<span class="w-2 h-2 rounded-full {agent.connected ? 'bg-emerald-500' : 'bg-red-500'}"></span>
 				</button>

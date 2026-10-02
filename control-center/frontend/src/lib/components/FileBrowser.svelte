@@ -9,12 +9,14 @@
 
 	let currentPath = $state('/');
 	let entries = $state<DirEntry[]>([]);
+	let totalEntries = $state(0);
 	let loading = $state(false);
 	let breadcrumbs = $state<string[]>([]);
 	let loadError = $state<string | null>(null);
 	let activeAgentId = $state<string | null>(null);
 	let navigationRequest = 0;
 	let transferBusy = $state(false);
+	let transferLabel = $state('');
 	const transferState = createTransferState();
 
 	$effect(() => {
@@ -24,6 +26,7 @@
 		navigationRequest++;
 		currentPath = '/';
 		entries = [];
+		totalEntries = 0;
 		updateBreadcrumbs('/');
 		loadError = null;
 		if (agentId) void navigateTo('/', agentId);
@@ -42,6 +45,7 @@
 		if (!agent.connected) {
 			if (requestedAgentId === $selectedAgentId) {
 				entries = [];
+				totalEntries = 0;
 				loadError = 'Agent is disconnected';
 				loading = false;
 			}
@@ -56,11 +60,13 @@
 			const result = (await listDir(requestedAgentId, path)) as DirContents;
 			if (requestId !== navigationRequest || requestedAgentId !== $selectedAgentId) return;
 			entries = result.entries || [];
+			totalEntries = Math.max(result.total ?? 0, entries.length);
 		} catch (err) {
 			if (requestId !== navigationRequest || requestedAgentId !== $selectedAgentId) return;
 			loadError = getErrorMessage(err);
 			addNotification('error', `Failed to list directory: ${loadError}`);
 			entries = [];
+			totalEntries = 0;
 		} finally {
 			if (requestId === navigationRequest) loading = false;
 		}
@@ -88,6 +94,7 @@
 	async function downloadEntry(entry: DirEntry): Promise<void> {
 		const agentId = $selectedAgentId;
 		if (!agentId || !canDownloadEntry(entry) || !beginTransfer('download')) return;
+		transferLabel = `Downloading ${entry.name}`;
 		try {
 			await downloadFile(agentId, entry.path);
 			addNotification('success', `Downloaded ${entry.name}`);
@@ -95,12 +102,14 @@
 			addNotification('error', `Download failed: ${normalizeTransferError(error)}`);
 		} finally {
 			endTransfer('download');
+			transferLabel = '';
 		}
 	}
 
 	async function uploadToCurrentDirectory(): Promise<void> {
 		const agentId = $selectedAgentId;
 		if (!agentId || !beginTransfer('upload')) return;
+		transferLabel = `Uploading to ${currentPath}`;
 		try {
 			await uploadFile(agentId, currentPath);
 			addNotification('success', 'File uploaded');
@@ -109,11 +118,18 @@
 			addNotification('error', `Upload failed: ${normalizeTransferError(error)}`);
 		} finally {
 			endTransfer('upload');
+			transferLabel = '';
 		}
 	}
 </script>
 
 <div class="h-full flex flex-col bg-slate-900">
+	{#if transferBusy}
+		<div class="flex items-center gap-2 px-4 py-2 text-sm text-cyan-200 bg-cyan-950/50 border-b border-cyan-800/50" role="status" aria-live="polite" aria-atomic="true">
+			<div class="w-3.5 h-3.5 border-2 border-cyan-800 border-t-cyan-300 rounded-full animate-spin" aria-hidden="true"></div>
+			<span>{transferLabel || 'File transfer in progress'}</span>
+		</div>
+	{/if}
 	<div class="flex items-center justify-between px-4 py-2 bg-slate-800 border-b border-slate-700">
 		<div class="flex items-center gap-1 text-sm font-mono">
 			<button aria-label="Open agent root directory" class="flex items-center text-amber-400 hover:text-amber-300 px-1 py-0.5 rounded bg-transparent border-none cursor-pointer disabled:opacity-40" onclick={() => navigateTo('/')} disabled={transferBusy}>
@@ -173,6 +189,11 @@
 					</span>
 				</div>
 			{/each}
+			{#if totalEntries > entries.length}
+				<div class="px-4 py-2 text-xs text-amber-300 bg-amber-950/30 border-b border-amber-900/40" role="status">
+					Showing the first {entries.length} of {totalEntries} entries.
+				</div>
+			{/if}
 		{/if}
 	</div>
 </div>

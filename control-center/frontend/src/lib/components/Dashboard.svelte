@@ -82,7 +82,7 @@
 				<div class="bg-slate-800/50 rounded-xl border border-slate-700 overflow-hidden hover:border-slate-600 transition-all duration-200">
 					<div class="flex items-center gap-2 px-4 py-3 border-b border-slate-700/50">
 						<div class="flex items-center gap-2 flex-1">
-							<span class="w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_6px_theme(colors.emerald.500)] flex-shrink-0"></span>
+							<span class="w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_6px_theme(colors.emerald.500)] flex-shrink-0" aria-label="Connected"></span>
 							<h3 class="text-sm font-semibold text-slate-100">{agent.name}</h3>
 						</div>
 						<span class="text-[10px] font-bold tracking-wide px-1.5 py-0.5 rounded {osMeta.color}">{osMeta.label}</span>
@@ -97,7 +97,7 @@
 									<span>CPU</span>
 									<span class="font-bold font-mono">{formatPercent(sys.cpu.percent)}</span>
 								</div>
-								<div class="w-full h-2 bg-slate-700 rounded-full overflow-hidden">
+								<div class="w-full h-2 bg-slate-700 rounded-full overflow-hidden" role="progressbar" aria-label={`CPU usage on ${agent.name}`} aria-valuemin="0" aria-valuemax="100" aria-valuenow={sys.cpu.percent}>
 									<div class="h-full rounded-full bg-gradient-to-r {getCpuColor(sys.cpu.percent)}" style="width: {sys.cpu.percent}%; transition: width 0.5s ease-out;"></div>
 								</div>
 								<div class="text-xs text-slate-600 mt-0.5">{sys.cpu.cores} cores</div>
@@ -108,25 +108,33 @@
 									<span>RAM</span>
 									<span class="font-bold font-mono">{formatPercent(sys.memory.percent)}</span>
 								</div>
-								<div class="w-full h-2 bg-slate-700 rounded-full overflow-hidden">
+								<div class="w-full h-2 bg-slate-700 rounded-full overflow-hidden" role="progressbar" aria-label={`Memory usage on ${agent.name}`} aria-valuemin="0" aria-valuemax="100" aria-valuenow={sys.memory.percent}>
 									<div class="h-full rounded-full bg-gradient-to-r {getMemColor(sys.memory.percent)}" style="width: {sys.memory.percent}%; transition: width 0.5s ease-out;"></div>
 								</div>
 								<div class="text-xs text-slate-600 mt-0.5">{formatBytes(sys.memory.used)} / {formatBytes(sys.memory.total)}</div>
 							</div>
 
-							{#if sys.disks && sys.disks.length > 0}
-								{@const disk = sys.disks[0]}
+							{#each sys.disks ?? [] as disk (disk.mount)}
 								<div>
 									<div class="flex justify-between text-xs text-slate-300 mb-1">
 										<span>Disk ({disk.mount})</span>
 										<span class="font-bold font-mono">{formatPercent(disk.percent)}</span>
 									</div>
-									<div class="w-full h-2 bg-slate-700 rounded-full overflow-hidden">
+									<div class="w-full h-2 bg-slate-700 rounded-full overflow-hidden" role="progressbar" aria-label={`${disk.mount} disk usage on ${agent.name}`} aria-valuemin="0" aria-valuemax="100" aria-valuenow={disk.percent}>
 										<div class="h-full rounded-full bg-gradient-to-r from-violet-500 to-purple-500" style="width: {disk.percent}%; transition: width 0.5s ease-out;"></div>
 									</div>
-									<div class="text-xs text-slate-600 mt-0.5">{formatBytes(disk.used)} / {formatBytes(disk.total)}</div>
+									<div class="text-xs text-slate-600 mt-0.5">{formatBytes(disk.used)} / {formatBytes(disk.total)}{disk.fs_type ? ` · ${disk.fs_type}` : ''}</div>
 								</div>
-							{/if}
+							{:else}
+								<div class="text-xs text-slate-500">No disk information available</div>
+							{/each}
+
+							<div class="rounded-lg bg-slate-900/40 px-3 py-2 text-xs space-y-1" aria-label={`Network information for ${agent.name}`}>
+								<div class="text-[10px] uppercase tracking-wide text-slate-500">Network</div>
+								{#if sys.net?.ip}<div class="flex gap-2"><span class="text-slate-500">IP</span><span class="font-mono text-slate-300 break-all">{sys.net.ip}</span></div>{/if}
+								{#if sys.net?.mac}<div class="flex gap-2"><span class="text-slate-500">MAC</span><span class="font-mono text-slate-300">{sys.net.mac}</span></div>{/if}
+								{#if sys.net?.hostname}<div class="flex gap-2"><span class="text-slate-500">Hostname</span><span class="font-mono text-slate-300 break-all">{sys.net.hostname}</span></div>{/if}
+							</div>
 						</div>
 
 						<div class="flex items-center justify-between px-4 py-2 bg-slate-800/30 border-t border-slate-700/50">
