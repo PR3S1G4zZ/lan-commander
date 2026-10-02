@@ -6,16 +6,17 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"runtime"
+	"strings"
 
 	"github.com/kardianos/service"
 
+	"github.com/mediacode/lan-commander/agent/internal/audit"
 	"github.com/mediacode/lan-commander/agent/internal/discovery"
 	"github.com/mediacode/lan-commander/agent/internal/server"
 	"github.com/mediacode/lan-commander/agent/internal/ui"
+	"github.com/mediacode/lan-commander/agent/internal/version"
 )
-
-// Version is set at build time.
-var Version = "1.0.0"
 
 // agentFlags holds the parsed CLI configuration for a single run.
 type agentFlags struct {
@@ -26,6 +27,8 @@ type agentFlags struct {
 	tlsCert          string
 	tlsKey           string
 	authToken        string
+	authTokenFile    string
+	auditLog         string
 	noAuth           bool
 	uiMode           bool
 	managedByNotice  string
@@ -39,7 +42,9 @@ func parseAgentFlags(fs *flag.FlagSet, args []string) *agentFlags {
 	fs.BoolVar(&f.discoveryEnabled, "discovery", true, "Enable mDNS discovery")
 	fs.StringVar(&f.tlsCert, "tls-cert", "", "TLS certificate file path")
 	fs.StringVar(&f.tlsKey, "tls-key", "", "TLS private key file path")
-	fs.StringVar(&f.authToken, "auth-token", "", "Authentication token for client connections")
+	fs.StringVar(&f.authToken, "auth-token", "", "Authentication token for client connections (visible in the process list; prefer --auth-token-file)")
+	fs.StringVar(&f.authTokenFile, "auth-token-file", "", "File containing the authentication token (keeps it out of the service arguments)")
+	fs.StringVar(&f.auditLog, "audit-log", "", "Append a local JSON-lines audit trail of remote operations to this file")
 	fs.BoolVar(&f.noAuth, "no-auth", false, "Disable authentication (only for an isolated laboratory network)")
 	fs.BoolVar(&f.uiMode, "ui", false, "Run the client interface in the current desktop session")
 	fs.StringVar(&f.managedByNotice, "managed-by-notice", "", "Organisation name shown in the managed-device notice")
@@ -47,15 +52,83 @@ func parseAgentFlags(fs *flag.FlagSet, args []string) *agentFlags {
 	return f
 }
 
+// authTokenEnv is read when neither --auth-token nor --auth-token-file is given.
+const authTokenEnv = "LAN_COMMANDER_AUTH_TOKEN"
+
+// maxTokenFileSize bounds what is read from --auth-token-file.
+const maxTokenFileSize = 4096
+
+// readTokenFile returns the token stored in path, without surrounding whitespace.
+func readTokenFile(path string) (string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("--auth-token-file: %w", err)
+	}
+	if info.IsDir() || info.Size() > maxTokenFileSize {
+		return "", fmt.Errorf("--auth-token-file %q is not a small regular file", path)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("--auth-token-file: %w", err)
+	}
+	token := strings.TrimSpace(string(data))
+	if token == "" {
+		return "", fmt.Errorf("--auth-token-file %q is empty", path)
+	}
+	// Unix permission bits are meaningless on Windows, where the installer
+	// restricts the file with an ACL instead.
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+		log.Printf("[main] Warning: %s is readable by other users (mode %v); restrict it to the service account", path, info.Mode().Perm())
+	}
+	return token, nil
+}
+
+// resolveAuthToken fills f.authToken from --auth-token-file or the environment
+// when it was not given directly.
+func resolveAuthToken(f *agentFlags) error {
+	envToken := strings.TrimSpace(os.Getenv(authTokenEnv))
+
+	if f.authTokenFile != "" {
+		if f.authToken != "" {
+			return fmt.Errorf("--auth-token and --auth-token-file cannot be combined")
+		}
+		if f.noAuth {
+			return fmt.Errorf("--no-auth cannot be combined with --auth-token-file")
+		}
+		token, err := readTokenFile(f.authTokenFile)
+		if err != nil {
+			return err
+		}
+		f.authToken = token
+		return nil
+	}
+	if f.authToken == "" && envToken != "" {
+		if f.noAuth {
+			return fmt.Errorf("--no-auth cannot be combined with %s", authTokenEnv)
+		}
+		f.authToken = envToken
+	}
+	return nil
+}
+
 func validateAgentFlags(f *agentFlags) error {
+	// The server only enables TLS when both files are present. Accepting just
+	// one would silently fall back to plaintext ws:// on a port the operator
+	// believes is encrypted, so refuse to start instead.
+	if (f.tlsCert == "") != (f.tlsKey == "") {
+		return fmt.Errorf("--tls-cert and --tls-key must be provided together")
+	}
 	if f.noAuth && f.authToken != "" {
 		return fmt.Errorf("--no-auth cannot be combined with --auth-token")
+	}
+	if err := resolveAuthToken(f); err != nil {
+		return err
 	}
 	if f.noAuth {
 		return nil
 	}
 	if f.authToken == "" {
-		return fmt.Errorf("authentication token is required: pass --auth-token <token>, or explicitly use --no-auth only on an isolated laboratory network")
+		return fmt.Errorf("authentication token is required: pass --auth-token-file <file> (or --auth-token <token>), or explicitly use --no-auth only on an isolated laboratory network")
 	}
 	return nil
 }
@@ -63,14 +136,23 @@ func validateAgentFlags(f *agentFlags) error {
 // program implements service.Interface so the same binary can run in the
 // foreground, or be installed/managed as a Windows Service or systemd unit.
 type program struct {
-	flags  *agentFlags
-	cancel context.CancelFunc
+	flags   *agentFlags
+	cancel  context.CancelFunc
+	auditor *audit.Logger
 }
 
 func (p *program) Start(s service.Service) error {
 	if err := validateAgentFlags(p.flags); err != nil {
 		return err
 	}
+
+	// Open the audit log here so a bad path stops the service visibly instead
+	// of running with an audit trail the operator believes is active.
+	auditor, err := audit.Open(p.flags.auditLog)
+	if err != nil {
+		return err
+	}
+	p.auditor = auditor
 
 	ctx, cancel := context.WithCancel(context.Background())
 	p.cancel = cancel
@@ -102,6 +184,11 @@ func (p *program) run(ctx context.Context) {
 
 	addr := fmt.Sprintf("%s:%d", f.host, f.port)
 	srv := server.NewServer(addr, f.tlsCert, f.tlsKey, f.authToken)
+	if p.auditor != nil {
+		defer p.auditor.Close()
+		srv.SetAuditLogger(p.auditor)
+		log.Printf("[main] Audit trail enabled: %s", f.auditLog)
+	}
 
 	var mdnsService *discovery.MDNSService
 	if f.discoveryEnabled {
@@ -115,7 +202,7 @@ func (p *program) run(ctx context.Context) {
 		}
 	}
 
-	log.Printf("[main] LAN Commander Agent v%s starting on %s", Version, addr)
+	log.Printf("[main] LAN Commander Agent v%s starting on %s", version.Version, addr)
 	if err := srv.Start(ctx); err != nil {
 		log.Printf("[main] Server stopped: %v", err)
 	}
@@ -135,7 +222,7 @@ func banner(name string, port int) string {
  Agent: %s
  Port:  %d
  Version: %s
-`, name, port, Version)
+`, name, port, version.Version)
 }
 
 func main() {
@@ -157,7 +244,7 @@ func main() {
 	if f.uiMode {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		if err := ui.Run(ctx, ui.Config{Port: f.port, ManagedByNotice: f.managedByNotice, AgentVersion: Version}); err != nil {
+		if err := ui.Run(ctx, ui.Config{Port: f.port, ManagedByNotice: f.managedByNotice, AgentVersion: version.Version}); err != nil {
 			log.Fatalf("[main] Interface failed: %v", err)
 		}
 		return

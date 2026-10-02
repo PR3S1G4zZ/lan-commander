@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"runtime"
@@ -41,6 +42,11 @@ func Execute(cmd string, args []string, timeout int, shell string) (protocol.Com
 	defer cancel()
 
 	execCmd := exec.CommandContext(ctx, shellCmd, shellArgs...)
+	// Without a WaitDelay, a grandchild that inherits stdout/stderr keeps Run
+	// blocked after the shell was killed, so the timeout would not be enforced.
+	execCmd.WaitDelay = 2 * time.Second
+	applyShellCommandLine(execCmd, shellCmd, fullCmd)
+	configureProcessTree(execCmd)
 
 	var stdout, stderr bytes.Buffer
 	// Limit output by using capped writers
@@ -53,11 +59,16 @@ func Execute(cmd string, args []string, timeout int, shell string) (protocol.Com
 
 	exitCode := 0
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
-		} else if ctx.Err() == context.DeadlineExceeded {
+		var exitErr *exec.ExitError
+		switch {
+		case ctx.Err() == context.DeadlineExceeded:
 			exitCode = -1 // timeout
-		} else {
+		case errors.As(err, &exitErr):
+			exitCode = exitErr.ExitCode()
+		case errors.Is(err, exec.ErrWaitDelay) && execCmd.ProcessState != nil:
+			// The shell exited by itself but a leftover child kept the pipes open.
+			exitCode = execCmd.ProcessState.ExitCode()
+		default:
 			exitCode = -2 // execution error
 		}
 	}
@@ -97,16 +108,21 @@ type cappedWriter struct {
 }
 
 func (c *cappedWriter) Write(p []byte) (int, error) {
+	original := len(p)
 	remaining := c.limit - c.total
 	if remaining <= 0 {
-		return len(p), nil // silently drop
+		return original, nil // silently drop
 	}
 	if len(p) > remaining {
 		p = p[:remaining]
 	}
 	n, err := c.w.Write(p)
 	c.total += n
-	return len(p), err // report original length to caller
+	// Report the original length: returning fewer bytes than were offered
+	// without an error violates io.Writer and makes the stdout/stderr copy
+	// fail with io.ErrShortWrite, which broke any command printing more than
+	// the cap.
+	return original, err
 }
 
 // ValidateShell checks if the requested shell is available.

@@ -7,6 +7,8 @@ import (
 	"runtime"
 
 	"github.com/hashicorp/mdns"
+
+	"github.com/mediacode/lan-commander/agent/internal/version"
 )
 
 const (
@@ -16,8 +18,6 @@ const (
 	Domain = "local."
 	// TTLSeconds is the mDNS advertisement TTL.
 	TTLSeconds = 120
-	// AgentVersion is published in TXT records.
-	AgentVersion = "1.0.0"
 )
 
 // MDNSService manages mDNS advertisement for the agent.
@@ -39,7 +39,7 @@ func NewMDNSService(port int, hasAuth bool) (*MDNSService, error) {
 
 	// Build TXT records
 	info := []string{
-		fmt.Sprintf("version=%s", AgentVersion),
+		fmt.Sprintf("version=%s", version.Version),
 		fmt.Sprintf("os=%s", runtime.GOOS),
 		fmt.Sprintf("arch=%s", runtime.GOARCH),
 		fmt.Sprintf("auth=%t", hasAuth),

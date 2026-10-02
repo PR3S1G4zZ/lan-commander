@@ -50,6 +50,10 @@ type ExecCommandPayload struct {
 
 type ListDirPayload struct {
 	Path string `json:"path"`
+	// Offset and Limit page through large directories. Limit 0 keeps the legacy
+	// behaviour of a single page of the default size.
+	Offset int `json:"offset,omitempty"`
+	Limit  int `json:"limit,omitempty"`
 }
 
 type GetFilePayload struct {
@@ -105,7 +109,12 @@ type DirEntry struct {
 type DirContentsPayload struct {
 	Path    string     `json:"path"`
 	Entries []DirEntry `json:"entries"`
-	Total   int        `json:"total"`
+	// Total is the real number of entries in the directory, not the page size.
+	Total int `json:"total"`
+	// NextOffset is the Offset to request for the following page; HasMore is
+	// false once the whole directory has been delivered.
+	NextOffset int  `json:"next_offset"`
+	HasMore    bool `json:"has_more"`
 }
 
 type FileChunkPayload struct {
