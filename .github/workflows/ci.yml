@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - develop
       - "fix/**"
   pull_request:
   workflow_dispatch:
